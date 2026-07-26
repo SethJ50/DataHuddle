@@ -1,0 +1,37 @@
+/*
+ * Shared visual style for Shiny's interactive DataGrid (shiny.render.DataGrid),
+ * matching the look of presentation/table_style.py's static Styler-based
+ * tables: dark header, alternating rows, compact padding.
+ *
+ * shiny-data-frame (the DataGrid/DataTable custom element) renders its
+ * table in the regular light DOM, not a shadow root, so plain CSS selectors
+ * reach it directly. Where Shiny documents a CSS custom property for a
+ * setting (header background, gridlines, padding, font size, hover color),
+ * that's used instead of overriding internal styles directly. Header text
+ * color and alternating-row background have no such property, so those are
+ * plain selector overrides.
+ */
+
+.shiny-data-grid {
+  --shiny-datagrid-grid-header-bgcolor: #1a1a1a;
+  --shiny-datagrid-grid-header-gridlines-color: #444444;
+  --shiny-datagrid-grid-gridlines-color: #e0e0e0;
+  --shiny-datagrid-grid-body-hover-bgcolor: #f1f1f1;
+  --shiny-datagrid-font-size: 12px;
+  --shiny-datagrid-padding-x: 8px;
+  --shiny-datagrid-padding-y: 1px;
+}
+
+.shiny-data-grid thead th {
+  color: white;
+  font-weight: bold;
+  text-align: center;
+}
+
+.shiny-data-grid tbody td {
+  text-align: center;
+}
+
+.shiny-data-grid tbody tr:nth-child(even) {
+  background-color: #f9f9f9;
+}

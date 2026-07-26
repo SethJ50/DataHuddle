@@ -1,0 +1,9 @@
+/Developer Notes/
+
+# Regenerable caches / OS junk
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
+.claude/
+.agents/
+
