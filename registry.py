@@ -19,6 +19,7 @@ class Collections:
     UDK_TE_RANKINGS = "udk_te_rankings_ppr"
     DRAFTS = "drafts"
     PLAYER_MARKINGS = "player_markings"
+    TEAM_NOTES = "team_notes"
 
     # Planned per PLANNING.md — collections don't exist yet, constants reserved
     # so future repositories/adapters have one place to reference them from.

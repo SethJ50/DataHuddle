@@ -88,7 +88,15 @@ for tab, position in zip(pos_tab, POSITIONS):
                         default = saved,
                         key=f"select_{draft['draft_id']}_{curr_round}_{position}"
                     )
-                plans[store_key] = selected
+                # The multiselect controls WHICH players are on the board (membership).
+                # Priority ORDER lives separately in plans[store_key]: keep the existing
+                # order for players still selected, then append any newly added picks.
+                # This lets the Move arrows reorder players without the multiselect
+                # (which keeps its own click order) clobbering our ranking.
+                prev_order = plans.get(store_key, [])
+                ordered = [p for p in prev_order if p in selected]
+                ordered += [p for p in selected if p not in ordered]
+                plans[store_key] = ordered
 
                 all_players = (
                     by_name["adp"]
@@ -98,28 +106,45 @@ for tab, position in zip(pos_tab, POSITIONS):
                 )
                 st.dataframe(all_players, hide_index=True, use_container_width=True)
 
+        def bump(store_key, direction):
+            # Purpose: move one player up or down in the priority list.
+            # Reads which row was clicked from session_state, swaps it with its neighbor.
+            click = st.session_state[f"reorder_{store_key}"]   # {"row": int, "label": str}
+            order = plans[store_key]
+            i = click["row"]
+            j = i - 1 if "up" in click["label"] else i + 1
+            if 0 <= j < len(order):
+                order[i], order[j] = order[j], order[i] 
+
         with board_col:
-            board = (
-                by_name.loc[selected, ["canonical_id", "adp", "true_value_rank", "diff"]]
-                 .rename(columns={"display_name": "Player", "adp": "ADP", "true_value_rank":"True Value", "diff": "Diff"})
-            )
+            # Build the board in priority order (ordered), NOT the raw multiselect order.
+            board = by_name.loc[
+                ordered, ["canonical_id", "adp", "true_value_rank", "diff"]
+            ].reset_index()
 
-            board["Safe"] = board["canonical_id"].map(
-                lambda cid: "Safe" in cats_by_id.get(cid, set())
-            )
-            board["Upside"] = board["canonical_id"].map(
-                lambda cid: "Upside" in cats_by_id.get(cid, set())
-            )
+            board = board.rename(columns={
+                "display_name": "Player",
+                "adp": "ADP",
+                "true_value_rank": "True Value",
+                "diff": "Diff",
+            })
 
+            board["Move"] = [[":material/arrow_upward: up", ":material/arrow_downward: down"]] * len(board)
+
+            board["Safe"]   = board["canonical_id"].map(lambda cid: "Safe" in cats_by_id.get(cid, set()))
+            board["Upside"] = board["canonical_id"].map(lambda cid: "Upside" in cats_by_id.get(cid, set()))
             board = board.drop(columns="canonical_id")
-
-            board = board.reset_index().rename(columns={"display_name": "Player"})
 
             st.dataframe(
                 board, 
                 hide_index=True,
                 use_container_width=True,
                 column_config={
+                    "Move": st.column_config.ButtonColumn(
+                        "Move",
+                        key=f"reorder_{store_key}",
+                        on_click=bump, args=(store_key, None),
+                    ),
                     "Player":     st.column_config.TextColumn("Player", width="medium"),
                     "ADP":        st.column_config.NumberColumn("ADP", width="small"),
                     "True Value": st.column_config.NumberColumn("True Value", width="small"),

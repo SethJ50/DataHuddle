@@ -22,6 +22,7 @@ from services.adp_comparison_service import AdpComparisonService
 from services.draft_plan_service import DraftPlanService
 from services.draft_service import DraftService
 from services.player_markings_service import PlayerMarkingsService
+from services.team_notes_service import TeamNotesService
 
 
 class AppContext:
@@ -79,3 +80,4 @@ class AppContext:
 
         self.draft_service = DraftService()
         self.player_markings_service = PlayerMarkingsService()
+        self.team_notes_service = TeamNotesService()
