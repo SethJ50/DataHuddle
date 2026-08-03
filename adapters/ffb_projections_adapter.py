@@ -18,16 +18,52 @@ STAT_COLUMNS = [
 ]
 
 
+ANALYSTS = ("andy", "mike", "jason")
+"""The three Fantasy Footballers who publish separate projections. Their
+disagreement is itself a signal -- a player all three see the same way is a very
+different proposition from one they split on."""
+
+
 class FfbProjectionsAdapter:
-    def __init__(self, qb_collection_repo, flex_collection_repo):
-        self._qb_collection_repo = qb_collection_repo
-        self._flex_collection_repo = flex_collection_repo
+    """Loads Fantasy Footballers projections, one analyst at a time or all three.
 
-    def load(self) -> pd.DataFrame:
-        qb = self._normalize_qb(self._qb_collection_repo.read())
-        flex = self._normalize_flex(self._flex_collection_repo.read())
+    Each analyst publishes a QB file and a flex file with identical schemas, so
+    this takes a repo pair per analyst rather than a single pair.
+    """
 
-        combined = pd.concat([qb, flex], ignore_index=True, sort=False)
+    def __init__(self, repos_by_analyst: dict):
+        """
+        Parameters:
+            repos_by_analyst (dict): analyst name -> (qb_repo, flex_repo).
+        """
+        self._repos_by_analyst = repos_by_analyst
+
+    @property
+    def analysts(self) -> list:
+        """Which analysts actually have collections wired up."""
+        return list(self._repos_by_analyst)
+
+    def load(self, analyst: str) -> pd.DataFrame:
+        """
+        Purpose: One analyst's projections, QB and flex combined.
+
+        Parameters:
+            analyst (str): "andy", "mike" or "jason".
+
+        Returns:
+            pd.DataFrame -- one row per player with name, team, bye_week,
+            position, rank, and the ten STAT_COLUMNS. Missing stats are 0, since
+            a quarterback genuinely has no receptions.
+
+        Raises:
+            KeyError: Unknown analyst -- better than silently returning nothing.
+        """
+        qb_repo, flex_repo = self._repos_by_analyst[analyst]
+
+        combined = pd.concat(
+            [self._normalize_qb(qb_repo.read()), self._normalize_flex(flex_repo.read())],
+            ignore_index=True, sort=False,
+        )
 
         for col in STAT_COLUMNS:
             if col not in combined.columns:
@@ -35,6 +71,26 @@ class FfbProjectionsAdapter:
         combined[STAT_COLUMNS] = combined[STAT_COLUMNS].fillna(0)
 
         return combined
+
+    def load_all(self) -> pd.DataFrame:
+        """
+        Purpose: Every analyst's projections stacked into one long table.
+
+        Returns:
+            pd.DataFrame -- the same columns as load(), plus `analyst`. One row
+            per (player, analyst).
+
+        Notes:
+            Long rather than wide on purpose. The analysts don't cover identical
+            player sets -- Andy has 267 flex players to Mike's and Jason's 265 --
+            so a wide table would be full of NaN and every consumer would have to
+            decide what that meant. Long format makes "average over whoever
+            actually rated him" a plain groupby.
+        """
+        frames = []
+        for analyst in self._repos_by_analyst:
+            frames.append(self.load(analyst).assign(analyst=analyst))
+        return pd.concat(frames, ignore_index=True, sort=False)
 
     def _normalize_qb(self, df):
         if df.empty:

@@ -34,7 +34,7 @@ with left:
 
     with st.expander("Tags + Notes:", expanded=False):
         if draft is None:
-            st.info("Select or create a draft in the sidebar to add markings.")
+            st.info("Select a draft in the sidebar to add markings.")
         else:
             saved = ctx.player_markings_service.get(draft["draft_id"], canonical_id)
 

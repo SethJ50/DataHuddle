@@ -138,7 +138,7 @@ with right:
                     cats_by_id  = {m["canonical_id"]: set(m.get("categories", [])) for m in marks}
                     notes_by_id = {m["canonical_id"]: m.get("notes", "")          for m in marks}
                 else:
-                    st.info("Select or create a draft in the sidebar to mark players and add notes.")
+                    st.info("Select a draft in the sidebar to mark players and add notes.")
                     cats_by_id, notes_by_id = {}, {}
 
                 edited_tables = {}  # position -> edited DataFrame, collected for one Save

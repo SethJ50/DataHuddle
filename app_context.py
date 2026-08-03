@@ -13,7 +13,7 @@ from repositories.collection_repo import CollectionRepo
 from repositories.nfl_read_repo import NflReadRepo
 from repositories.player_directory import PlayerDirectory
 from repositories.player_identity_repo import PlayerIdentityRepo
-from adapters.ffb_projections_adapter import FfbProjectionsAdapter
+from adapters.ffb_projections_adapter import ANALYSTS, FfbProjectionsAdapter
 from adapters.udk_rankings_adapter import UdkRankingsAdapter
 from services.projections_service import ProjectionsService
 from services.roster_service import RosterService
@@ -23,6 +23,9 @@ from services.draft_plan_service import DraftPlanService
 from services.draft_service import DraftService
 from services.player_markings_service import PlayerMarkingsService
 from services.team_notes_service import TeamNotesService
+from repositories.ffc_repo import FfcRepo
+from services.ffc_service import FfcService
+from services.draft_sim_service import DraftSimService
 
 
 class AppContext:
@@ -62,10 +65,15 @@ class AppContext:
             self.roster_service,
         )
 
-        self.ffb_adapter = FfbProjectionsAdapter(
-            CollectionRepo(Collections.FFB_QB_PROJECTIONS),
-            CollectionRepo(Collections.FFB_FLEX_PROJECTIONS),
-        )
+        # One QB/flex repo pair per analyst. Their disagreement is a signal in
+        # its own right -- see ProjectionsService.disagreement().
+        self.ffb_adapter = FfbProjectionsAdapter({
+            analyst: (
+                CollectionRepo(Collections.FFB_QB_PROJECTIONS.format(analyst=analyst)),
+                CollectionRepo(Collections.FFB_FLEX_PROJECTIONS.format(analyst=analyst)),
+            )
+            for analyst in ANALYSTS
+        })
         self.projections_service = ProjectionsService(
             self.ffb_adapter,
             self.identity_repo,
@@ -81,3 +89,18 @@ class AppContext:
         self.draft_service = DraftService()
         self.player_markings_service = PlayerMarkingsService()
         self.team_notes_service = TeamNotesService()
+
+        # Fantasy Football Calculator — the app's only source of draft-position
+        # SPREAD (stdev), which the draft model needs alongside ADP. Unlike the
+        # other sources this one is keyed by FFC's own ids, so FfcService attaches
+        # canonical_id where it can (nullable — see draft_model/DESIGN.md).
+        self.ffc_repo = FfcRepo()
+        self.ffc_service = FfcService(self.ffc_repo, self.identity_repo)
+
+        # Serves saved simulation runs to the UI. Holds no simulation itself --
+        # the expensive work happens offline in scripts/run_draft_sim.py.
+        self.draft_sim_service = DraftSimService(
+            self.ffc_service,
+            self.adp_comparison_service,
+            self.projections_service,
+        )

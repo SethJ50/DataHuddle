@@ -59,7 +59,10 @@ class PlayerIdentityRepo:
         mapped = self.resolve_many(source, names)
         still_missing = mapped.isna()
         if still_missing.any():
-            mapped = mapped.copy()
+            # astype(object) because an all-unresolved Series comes back as
+            # float64 (all-NaN), and assigning string ids into a float column is
+            # deprecated in pandas 2 and an error in pandas 3.
+            mapped = mapped.astype(object).copy()
             fallback_positions = positions[still_missing] if positions is not None else None
             mapped.loc[still_missing] = self._player_directory.resolve_by_display_name(
                 names[still_missing], fallback_positions

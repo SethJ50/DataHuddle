@@ -1,11 +1,76 @@
 import pandas as pd
+from datetime import datetime, timezone
+
 from scoring import ScoringFormat
+from registry import Collections
+from db.documents import find_one, upsert
 
 class DraftPlanService:
     def __init__(self, roster_service, adp_comparison_service, projections_service):
         self._roster_service = roster_service
         self._adp_comparison_service = adp_comparison_service
         self._projections_service = projections_service
+
+    def save_plan(self, draft_id, plans):
+        """
+        Purpose:
+            Persist a draft's whole board plan -- every round/position's selected
+            players, in priority order -- to Mongo, so it survives page reloads.
+
+        Parameters:
+            draft_id (str): The draft these selections belong to.
+            plans (dict): The in-session store, keyed by a (round_label, position)
+                tuple -> list of player display names in priority order. Shape:
+                {("1.04", "QB"): ["Player A", "Player B"], ...}.
+
+        Returns:
+            None. Writes one document per draft into the draft_plans collection.
+
+        Notes:
+            Mongo can't use tuple keys, so the dict is flattened into a list of
+            {round, position, players} entries. Empty selections are dropped to
+            keep the document tidy. Upsert keyed on draft_id means re-saving
+            overwrites the previous plan rather than piling up documents.
+        """
+        entries = [
+            {"round": round_label, "position": position, "players": players}
+            for (round_label, position), players in plans.items()
+            if players  # skip rounds/positions with nothing selected
+        ]
+
+        doc = {
+            "draft_id": draft_id,
+            "entries": entries,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        upsert(Collections.DRAFT_PLANS, {"draft_id": draft_id}, doc)
+
+    def get_plan(self, draft_id):
+        """
+        Purpose:
+            Load a draft's saved board plan back into the shape the page uses,
+            so selections can be restored when the page (re)loads.
+
+        Parameters:
+            draft_id (str): The draft whose plan to load.
+
+        Returns:
+            dict keyed by (round_label, position) tuple -> list of player names,
+            matching what save_plan() stored. Empty dict if this draft has no
+            saved plan yet.
+
+        Notes:
+            Rebuilds the tuple keys from the flat {round, position, players}
+            entries written by save_plan().
+        """
+        doc = find_one(Collections.DRAFT_PLANS, {"draft_id": draft_id})
+        if not doc:
+            return {}
+
+        return {
+            (entry["round"], entry["position"]): entry["players"]
+            for entry in doc.get("entries", [])
+        }
 
     def pick_labels(self, num_teams, draft_position, num_rounds):
         """
@@ -82,6 +147,10 @@ class DraftPlanService:
         # breaking ties arbitrarily -- e.g. two players tied for the best ADP
         # both get rank 1, not 1 and 2.
         candidates["adp_rank"] = candidates["adp"].rank(method="min")
+        # TODO - TrueVal
+        # - for yahoo is adjusted adp for keep
+        # - for NFL was difference between NFL platform and FFB
+        # - Future - should be platform rank adjusted for keepers, and diff is diff from FFB rank overall?
         candidates["true_value_rank"] = candidates["projected_points"].rank(method="min", ascending=False)
         candidates["diff"] = candidates["adp_rank"] - candidates["true_value_rank"]
 
