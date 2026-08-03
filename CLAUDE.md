@@ -4,15 +4,24 @@ This application is a Streamlit application for aggregating various data sources
 
 To run the application, we use the following command:
 ```
-    shiny run --reload --launch-browser app.py
+    streamlit run streamlit_app.py
 ```
 
+To run the test suite:
+```
+    pytest
+```
+
+## Documentation Style
+Every function, method, and class must have a docstring. Use Google-style formatting. Write for a beginner programer - someone who knows basic Python syntax but not this codebase.
+
+### Required in every docstring
+1. **One-line summary**: what this does, in plain English. No jargon. If a technical term is unavoidable, describe it in the description.
+2. **Description**: 1-3 sentences on *why* this exists and when it gets used.
+3. **Steps**: a numbered, plain-English walkthrough of what happens inside. Whenever a step calls another function in this project, name it and say in a few words what it's for.
+4. **Args / Returns / Raises**: describe each in beginner terms, not just types.
 
 # Response Instructions
-## Code Style
-- Please include human friendly comments for every function you write. Cater any sorts of descriptions towards a beginner/intermediate programmer.
-    -  For classes, include a description of the class as a whole and what it acheives. 
-    - For every function, include: Purpose, Parameters, Returns, and Notes, giving an easily understandable picture of what the function acheives and how it fits into the system as a whole.
 
 ## Code Planning + Answering Questions
 I will often ask for help in planning code, ask questions about existing code, or ask for help in implementing something.

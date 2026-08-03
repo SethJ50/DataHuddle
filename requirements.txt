@@ -1,5 +1,9 @@
 streamlit==1.60.0
-shiny==1.5.0
 pymongo
 pandas
+numpy
 nflreadpy
+requests
+
+# Dev / test only
+pytest

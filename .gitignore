@@ -6,4 +6,10 @@ __pycache__/
 .DS_Store
 .claude/
 .agents/
+.pytest_cache/
+
+# Draft-sim artifacts: regenerable from scripts/run_draft_sim.py, ~6 MB each.
+# The .npz holds the picks matrix; keeping it out of git is why the metadata
+# inside it records the config + seed needed to reproduce it.
+data/sim/
 
