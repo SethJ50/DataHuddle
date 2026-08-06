@@ -8,7 +8,7 @@ standing between that bug and a whole season of confident bad advice.
 
 import pytest
 
-from draft_model.config import DraftConfig
+from draft_model.config import DraftConfig, Keeper
 from draft_model.mechanics import effective_value, picks_for_slot, snake_order
 from scoring import ScoringFormat
 
@@ -92,7 +92,15 @@ def test_fingerprint_changes_with_simulation_inputs():
     assert DraftConfig(**base).fingerprint() == original          # stable
     assert DraftConfig(**{**base, "num_teams": 10}).fingerprint() != original
     assert DraftConfig(**{**base, "num_rounds": 16}).fingerprint() != original
-    assert DraftConfig(**{**base, "keepers": ("x",)}).fingerprint() != original
+    keeper = Keeper(team=3, round=2, canonical_id="x")
+    assert DraftConfig(**{**base, "keepers": (keeper,)}).fingerprint() != original
+
+    # The ROUND a keeper is spent in changes which pick is consumed, so it has
+    # to move the fingerprint too -- otherwise editing a keeper's round would
+    # silently reuse a simulation run against the old one.
+    moved = Keeper(team=3, round=7, canonical_id="x")
+    assert (DraftConfig(**{**base, "keepers": (moved,)}).fingerprint()
+            != DraftConfig(**{**base, "keepers": (keeper,)}).fingerprint())
     assert DraftConfig(**{**base, "random_seed": 1}).fingerprint() != original
 
 

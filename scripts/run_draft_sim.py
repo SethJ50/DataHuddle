@@ -32,19 +32,47 @@ from draft_model.engine import monte_carlo_sim, position_index
 SEASONS = [2024, 2025]
 
 def run_one(ctx, draft, args) -> bool:
-    """
-    Purpose: Build, calibrate, simulate and save one draft's availability model.
+    """Build, calibrate, simulate, and save one draft's availability model.
 
-    Parameters:
-        ctx (AppContext): Shared data services.
-        draft (dict): One draft document from DraftService.
-        args: Parsed command-line arguments.
+    The whole offline pipeline for a single league, in the order it has to
+    happen. This is the expensive work the app itself never does.
+
+    Steps:
+        1. Build the config from the saved draft and work out where its artifact
+           belongs.
+        2. Print the league's settings, so the output records what was run.
+        3. If --skip-existing was passed and a current artifact is already there,
+           stop here.
+        4. Build the model table via the sim service, and pull out the position
+           numbers and the ADP and spread targets.
+        5. If the league has keepers, translate them into the picks they consume
+           with `DraftSimService.keeper_columns`, so the simulator reserves those
+           picks and holds the kept players off the board.
+        6. Calibrate with `calibrate_sampler` from draft_model/calibrate.py,
+           unless --no-calibrate was passed, in which case use the raw targets.
+           The keeper picks go in too, so calibration tunes against the same
+           draft the full run will produce.
+        7. Run the full simulation with `monte_carlo_sim` from
+           draft_model/engine.py.
+        8. Check the result with `validate_sim`, printing every check rather than
+           stopping at the first failure.
+        9. Refuse to save anything that failed validation — a bad artifact would
+           be served confidently by the app. The one exception is a keeper league
+           whose ONLY failure is calibration, which is expected rather than
+           broken; see the comment at that step.
+       10. Save the matrix with `save_picks_matrix`, recording the settings used
+           and the calibration trace alongside it.
+
+    Args:
+        ctx: The shared AppContext holding every data service.
+        draft: One draft document from DraftService.
+        args: The parsed command-line arguments.
 
     Returns:
-        bool: True if an artifact was written (or would have been, under
-        --dry-run). False if it was skipped or failed validation.
+        bool: True if an artifact was written, or would have been under
+            --dry-run. False if it was skipped or failed validation.
 
-    Notes:
+    Note:
         Returns rather than raises so that --all keeps going after one draft
         fails. A single bad league should not stop the others being refreshed.
     """
@@ -58,7 +86,8 @@ def run_one(ctx, draft, args) -> bool:
           f"drafting on {config.platform}")
     print(f"picks   : {config.my_picks}")
     if config.keepers:
-        print(f"keepers : {len(config.keepers)}")
+        print(f"keepers : {len(config.keepers)} "
+              f"({config.total_picks - len(config.keepers)} real selections)")
 
     if args.skip_existing and path.exists():
         print(f"  already current ({path.name}) -- skipping")
@@ -71,16 +100,20 @@ def run_one(ctx, draft, args) -> bool:
     stdev_target = table["stdev_target"].to_numpy()
     print(f"pool    : {len(table)} players for {config.total_picks} picks")
 
-    # Keepers are stored as canonical_ids; the simulation works in table rows.
-    already_drafted = None
-    if config.keepers:
-        kept = table["canonical_id"].isin(config.keepers).to_numpy()
-        already_drafted = kept
-        print(f"          {int(kept.sum())} keepers removed from the pool")
+    # Keepers name players by canonical_id and rounds by team; the simulator
+    # works in matrix columns and absolute pick numbers. Translate once, here.
+    keeper_picks = ctx.draft_sim_service.keeper_columns(config, table)
+    if keeper_picks:
+        print(f"          {len(keeper_picks)} keepers occupy picks "
+              f"{sorted(keeper_picks)}")
 
-    sim_kwargs = {} if already_drafted is None else {"already_drafted": already_drafted}
+    sim_kwargs = {"keeper_picks": keeper_picks} if keeper_picks else {}
 
     # --- calibration ---------------------------------------------------
+    # Calibration must simulate the SAME draft the full run will, keepers and
+    # all. Without the keeper picks it would tune against a draft that makes
+    # more selections than the real one, and every mu would come out slightly
+    # early.
     trace = []
     if args.no_calibrate:
         print("\nskipping calibration (--no-calibrate): using raw ADP and stdev")
@@ -90,6 +123,7 @@ def run_one(ctx, draft, args) -> bool:
         mu, sd, trace = calibrate_sampler(
             adp_target, stdev_target, pos_index, config,
             n_iterations=args.iterations, n_sims=args.calibration_sims,
+            keeper_picks=keeper_picks,
         )
 
     # --- full run ------------------------------------------------------
@@ -99,12 +133,34 @@ def run_one(ctx, draft, args) -> bool:
     # --- validation ----------------------------------------------------
     print("\nvalidation:")
     results = validate_sim(picks, adp_target, stdev_target, config,
-                           raise_on_failure=False)
+                           raise_on_failure=False, keeper_picks=keeper_picks)
     for name, outcome in results.items():
         mark = "PASS" if outcome["passed"] else "FAIL"
         print(f"  [{mark}] {name}: {outcome['detail']}")
 
     failed = [n for n, o in results.items() if not o["passed"]]
+
+    # A keeper league CANNOT reproduce vendor ADP, and that is a property of the
+    # league rather than a fault in the model. Vendor ADP is measured in redraft
+    # drafts; taking players out of the pool means everyone still in it genuinely
+    # goes earlier than their redraft number says. Keeping ordinary players costs
+    # a few tenths of a pick, but a league where every team keeps a first-rounder
+    # can shift the board by ten picks or more, and no amount of calibration can
+    # or should remove that.
+    #
+    # So calibration is downgraded to a warning HERE and only here, and only when
+    # keepers exist. The other four checks are structural identities that hold
+    # regardless of keepers, so they stay blocking -- they are what actually
+    # catches a broken simulation.
+    if keeper_picks and failed == ["calibration"]:
+        print(f"\n  calibration is off by more than the tolerance, which is EXPECTED "
+              f"with {len(keeper_picks)} keeper(s):")
+        print(f"  removing kept players from the pool pulls everyone else earlier "
+              f"than their redraft ADP.")
+        print(f"  the bigger the keepers, the bigger the gap. Saving anyway; every "
+              f"structural check passed.")
+        failed = []
+
     if failed:
         print(f"\n  {len(failed)} check(s) failed: {', '.join(failed)}")
         if not args.dry_run:
@@ -132,6 +188,31 @@ def run_one(ctx, draft, args) -> bool:
 
 
 def main():
+    """Parse the command line, choose which drafts to run, and run them.
+
+    The entry point when this file is run from the command line.
+
+    Steps:
+        1. Define every command-line option, using this file's module docstring
+           as the help text.
+        2. Build the AppContext and load the saved drafts, exiting with a useful
+           message if there are none.
+        3. If --list was passed, print each draft with whether its simulation is
+           current, then stop without running anything.
+        4. Choose the targets: every draft with --all, one specific draft with
+           --draft-id, or the first saved draft otherwise.
+        5. Run each through `run_one` above, counting how many were written.
+           Since `run_one` returns rather than raises, one bad league does not
+           stop the rest.
+        6. Print a summary when more than one draft was targeted.
+
+    Returns:
+        None: Progress is printed as it goes.
+
+    Raises:
+        SystemExit: If no drafts are saved, or if --draft-id names one that does
+            not exist. Both print an actionable message first.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--draft-id", help="which saved draft (default: the only/first one)")
     parser.add_argument("--all", action="store_true",

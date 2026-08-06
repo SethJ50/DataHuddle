@@ -53,7 +53,9 @@ class FfcPull:
 
     Exists so the caller has ONE thing to check. FFC can fail to give you data in
     two different ways, and a loop over many years must treat them identically or
-    it will quietly skip the wrong things.
+    it will quietly skip the wrong things. Being a frozen dataclass means the
+    fields below are filled in once, when the object is created, and cannot be
+    changed afterwards.
 
     Attributes:
         ok: True only when at least one player row came back. Check this before
@@ -75,34 +77,58 @@ class FfcPull:
 
 
 def snap_team_count(teams: int) -> int:
-    """
-    Purpose: Coerce a league size to one FFC will accept.
+    """Round a league size to the nearest one FFC will accept.
 
-    Parameters:
-        teams (int): Your league's real team count, e.g. 13.
+    FFC only accepts league sizes of 8, 10, 12, or 14 and returns an error for
+    anything else, so a 13-team league has to be sent as something else. This
+    exists purely to avoid that error.
+
+    Steps:
+        1. Compare the requested team count against each value in
+           VALID_TEAM_COUNTS and measure the distance to each.
+        2. Return whichever accepted value is closest.
+
+    Args:
+        teams: Your league's real team count, for example 13.
 
     Returns:
         int: The nearest value in VALID_TEAM_COUNTS.
 
-    Notes:
-        Cosmetic. FFC returns identical ADP for every accepted team count, so
-        this only prevents an HTTP 400 -- it does not tailor the data to your
-        league. Do not let this function's existence imply otherwise.
+    Note:
+        This is cosmetic. FFC returns identical ADP for every accepted team
+        count, so this only prevents an HTTP 400 -- it does not tailor the data
+        to your league. Do not let this function's existence imply otherwise.
     """
     return min(VALID_TEAM_COUNTS, key=lambda valid: abs(valid - teams))
 
 
 def normalize_players(raw_players: list[dict]) -> pd.DataFrame:
-    """
-    Purpose: Turn FFC's raw player dicts into the canonical table the app uses.
+    """Turn FFC's raw player records into the canonical table the app uses.
 
-    Parameters:
-        raw_players (list[dict]): Straight from the response's "players" key. Each
-            dict has: player_id, name, position, team, adp, adp_formatted,
-            times_drafted, high, low, stdev, bye.
+    Every FFC-specific quirk is handled here so that nothing downstream ever has
+    to look at a raw FFC field: positions get renamed, unmeasurable spreads get
+    marked as missing, and duplicate players get collapsed.
+
+    Steps:
+        1. Load the list of records into a DataFrame, one row per player.
+        2. Build a new table column by column, converting each numeric field
+           with `errors="coerce"` so a malformed value becomes NaN instead of
+           raising, and mapping FFC's position names through
+           `canonical_position` from registry.py so "PK" and "DEF" become "K"
+           and "DST".
+        3. Replace any `stdev` of exactly 0 with NaN -- see the note below.
+        4. Sort by sample size and drop duplicate player ids, keeping the
+           better-sampled row.
+        5. Sort by ADP so the earliest-drafted player comes first, and renumber
+           the rows.
+
+    Args:
+        raw_players: The list straight from the response's "players" key. Each
+            record is a dictionary with the keys player_id, name, position,
+            team, adp, adp_formatted, times_drafted, high, low, stdev, and bye.
 
     Returns:
-        pd.DataFrame -- one row per player, sorted by adp, with columns:
+        pd.DataFrame: One row per player, sorted by adp, with columns:
             ffc_player_id  int    FFC's own id; the join key for the sim table
             name           str    "Jahmyr Gibbs"
             position       str    canonical QB/RB/WR/TE/K/DST (PK and DEF remapped)
@@ -114,7 +140,11 @@ def normalize_players(raw_players: list[dict]) -> pd.DataFrame:
             times_drafted  float  sample size behind adp/stdev
             bye            float  bye week
 
-    Notes:
+    Raises:
+        KeyError: If FFC's records are missing one of the expected keys, which
+            would mean the API's shape changed.
+
+    Note:
         `adp_formatted` ("1.02") is dropped deliberately: it bakes in FFC's
         assumed 12-team draft. ui_helpers.adp_to_round_pick() computes the same
         thing against YOUR league size.
@@ -128,6 +158,7 @@ def normalize_players(raw_players: list[dict]) -> pd.DataFrame:
         The count columns stay float rather than int so a malformed row becomes a
         visible NaN instead of a silent 0.
     """
+    # One row per player, columns exactly as FFC named them.
     df = pd.DataFrame(raw_players)
 
     out = pd.DataFrame({
@@ -168,39 +199,70 @@ class FfcAdapter:
     """
 
     def __init__(self, base_url: str = BASE_URL, timeout: float = 15.0, session=None):
-        """
-        Parameters:
-            base_url (str): Overridable so tests can point at a local stub.
-            timeout (float): Seconds before a request is abandoned.
-            session (requests.Session | None): Reused across calls so the history
-                backfill (dozens of requests) shares one TCP connection. A fresh
-                Session is created if omitted.
+        """Set up how this adapter will talk to the FFC service.
+
+        All three settings have working defaults, so `FfcAdapter()` with no
+        arguments is the normal way to build one. Tests override them.
+
+        Steps:
+            1. Store the base URL, the timeout, and the HTTP session on the
+               instance.
+            2. If no session was supplied, create a fresh `requests.Session`.
+
+        Args:
+            base_url: Where the ADP endpoint lives. Overridable so tests can
+                point at a local stub instead of the real service.
+            timeout: How many seconds to wait for a response before giving up.
+            session: A `requests.Session` to reuse across calls, so the history
+                backfill's dozens of requests share one network connection. A
+                fresh one is created if omitted.
         """
         self._base_url = base_url
         self._timeout = timeout
         self._session = session or requests.Session()
 
     def fetch(self, fmt: ScoringFormat, year: int, teams: int = 12) -> FfcPull:
-        """
-        Purpose: Pull one ADP snapshot and hand back a normalized table plus the
-            metadata describing which drafts produced it.
+        """Pull one ADP snapshot, plus the metadata describing which drafts made it.
 
-        Parameters:
-            fmt (ScoringFormat): REGULAR / HALF_PPR / FULL_PPR, translated to
-                FFC's own spelling.
-            year (int): Season to pull. Required -- omitting it returns a
-                different season with no warning.
-            teams (int): League size, snapped to something FFC accepts. Recorded
-                for provenance only; it does not change the data.
+        This is the only method callers need. It always hands back an `FfcPull`
+        rather than raising when a season has no data, which is what lets an
+        ingest script loop over many years without special-casing the gaps.
+
+        Steps:
+            1. Translate the app's scoring format into FFC's own spelling using
+               FFC_FORMAT_BY_SCORING.
+            2. Round the team count to something FFC accepts with
+               `snap_team_count` above, and record what was asked for.
+            3. Send the GET request with the app's user-agent and timeout.
+            4. If the status code is not 200, build a failed pull, using
+               `_error_message` below to extract a readable reason.
+            5. Read the JSON body and pull out its "players" list.
+            6. If that list is empty, this is the second kind of no-data answer
+               (see the module docstring), so return a failed pull too -- the
+               caller then handles both kinds identically.
+            7. Otherwise hand the raw records to `normalize_players` above and
+               return a successful pull.
+
+        Args:
+            fmt: REGULAR, HALF_PPR, or FULL_PPR, translated to FFC's spelling.
+            year: Which season to pull. Required -- omitting it makes FFC return
+                a different season with no warning.
+            teams: League size, rounded to something FFC accepts. Recorded for
+                provenance only; it does not change the data that comes back.
 
         Returns:
-            FfcPull. Always check `.ok` before using `.players`.
+            FfcPull: Always check `.ok` before using `.players`. When `.ok` is
+                False, `.error` explains why and `.players` is empty.
 
-        Notes:
-            Never raises for an absent season -- "there is no 2025 data" is a
-            normal answer when you are looping over years, not an exception.
-            Genuine transport failures (timeout, DNS) still propagate, because
-            those mean something is wrong with YOU, not with the year.
+        Raises:
+            requests.exceptions.RequestException: For genuine transport failures
+                such as a timeout or DNS error. Those mean something is wrong
+                with YOU, not with the year, so they are allowed through rather
+                than folded into an FfcPull.
+
+        Note:
+            "There is no 2025 data" is a normal answer when looping over years,
+            not an exception, which is why it comes back as `ok=False`.
 
             FFC recomputes once daily. Call this from ingest scripts and cache
             the result; never call it per page request.
@@ -245,11 +307,29 @@ class FfcAdapter:
 
 
 def _error_message(response) -> str:
-    """Best-effort human-readable reason from a non-200 FFC response.
+    """Build the most readable failure reason available from a bad FFC response.
 
-    FFC returns JSON even on errors, shaped {status, errors: [...]}, but we
-    cannot rely on that for every failure (a proxy or outage may return HTML),
-    so fall back to the status code.
+    FFC normally explains its own errors in the response body, which is far more
+    useful than a bare status code. But that cannot be relied on for every
+    failure, so this degrades gracefully rather than raising while trying to
+    describe another error.
+
+    Steps:
+        1. Try to read the response body as JSON.
+        2. Look for an "errors" list, either at the top level or nested under
+           "meta".
+        3. If one is there, join its entries into a single line alongside the
+           status code.
+        4. If the body was not JSON at all, which happens when a proxy or outage
+           returns an HTML error page, fall through and return just the status
+           code.
+
+    Args:
+        response: The `requests` response object whose status code was not 200.
+
+    Returns:
+        str: Something like "HTTP 400: Invalid year" when FFC explained itself,
+            or plain "HTTP 502" when it did not.
     """
     try:
         payload = response.json()

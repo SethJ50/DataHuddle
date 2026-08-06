@@ -1,3 +1,18 @@
+"""The main pre-draft planning page: who to target at each of your picks.
+
+Organized around the picks you actually own. Choose a round, and the page shows
+one tab per position, each listing candidates with their ADP, your own
+projection, and — when a simulation has been run — how likely each is to still
+be there when your turn comes and what waiting would cost you.
+
+Players you pick out are collected into a plan you can reorder by priority and
+save, so it survives a page reload and is there on draft day.
+
+Like every file in pages/, this is a script rather than a set of functions:
+Streamlit runs it top to bottom each time the page is shown, or any widget on
+it is changed.
+"""
+
 import streamlit as st
 
 from streamlit_state import get_app_context
@@ -13,21 +28,58 @@ ctx = get_app_context()
 POSITIONS = ["QB", "RB", "WR", "TE"]
 
 # Header overrides for board columns; anything not listed uses its own name.
-BOARD_COLUMN_LABELS = {"True Value": "TrVal"}
+# Empty at the moment: every column the board shows has a heading short enough
+# to use as-is. Kept rather than removed because the board is where long headings
+# turn up, and "True Value" (currently not displayed) needed one.
+BOARD_COLUMN_LABELS = {}
 
 # Fixed pixel width for the mark (checkbox) columns.
 MARK_COLUMN_WIDTH = 45
 
 
 def board_header(name):
-    # Display header for a board column: an override if one exists, else the name.
+    """Get the heading to display for one board column.
+
+    Most columns are shown under their own name; a few are too wide and get a
+    shorter override. Routing every heading through here means the board does not
+    have to check for exceptions itself.
+
+    Steps:
+        1. Look the column name up in BOARD_COLUMN_LABELS, falling back to the
+           name itself when there is no override.
+
+    Args:
+        name: The column's real name, such as "Avail".
+
+    Returns:
+        str: The heading to display, which is often the same string back.
+    """
     return BOARD_COLUMN_LABELS.get(name, name)
 
 
 def bump(store_key):
-    # Purpose: move one player up or down in a board's priority list.
-    # Reads which arrow was clicked from session_state and swaps that row with
-    # its neighbor. Registered as the Move column's on_click callback.
+    """Move one player up or down in a board's priority list.
+
+    Registered as the Move column's click handler, so Streamlit calls this when
+    an arrow is clicked, before the page re-runs. That ordering is what makes the
+    reordered list render on the very next pass.
+
+    Steps:
+        1. Read which arrow was clicked out of session state. Streamlit records
+           the row number and the arrow's label there.
+        2. Look up the priority list this board is storing.
+        3. Work out the neighbouring row: one earlier for an up arrow, one later
+           otherwise.
+        4. Swap the two entries, unless the neighbour would fall off either end,
+           which is what stops the top row moving up.
+
+    Args:
+        store_key: Identifies which board's list to reorder, and which session
+            state entry holds the click.
+
+    Returns:
+        None: The priority list is modified in place.
+    """
     click = st.session_state[f"reorder_{store_key}"]   # {"row": int, "label": str}
     order = plans[store_key]
     i = click["row"]
@@ -96,7 +148,7 @@ if board_error:
         f"```\n{board_error}\n```",
         icon=":material/warning:",
     )
-    availability_by_id, cost_by_id = {}, {}
+    availability_by_id, cost_by_id, kept_by_id = {}, {}, {}
 else:
     if sim_board.stale:
         st.warning(
@@ -110,6 +162,14 @@ else:
     _sim = sim_board.availability(target_picks=[current_pick, next_pick]).dropna(subset=["canonical_id"])
     availability_by_id = dict(zip(_sim["canonical_id"], _sim[f"P@{current_pick}"]))
     cost_by_id = dict(zip(_sim["canonical_id"], _sim["cost_of_waiting"]))
+
+    # Who is already on somebody's roster, and where. Shown next to a 0%
+    # availability so a player reading as "certain to be gone" is distinguishable
+    # from one who was never available in the first place.
+    kept_by_id = {
+        keeper.canonical_id: f"T{keeper.team} R{keeper.round}"
+        for keeper in sim_board.config.keepers
+    }
 
     with st.container(border=True):
         st.caption(
@@ -129,12 +189,37 @@ pos_tab = st.tabs(POSITIONS)
 
 @st.cache_data(show_spinner="Ranking candidates...")
 def get_candidates_by_position(platform: str, fmt: ScoringFormat) -> dict:
+    """Rank the candidates at every position, reusing the result between reruns.
+
+    Building these tables touches the roster, the ADP comparison, and the
+    projections, so it is far too slow to redo on every widget click. The
+    `@st.cache_data` decorator above keeps the result per platform and scoring
+    format.
+
+    Steps:
+        1. For each of the four positions, call `rank_candidates` on the draft
+           plan service.
+        2. Label each table's rows by display name, so the board can look a
+           player up by the name shown in its dropdown.
+
+    Args:
+        platform: Which platform's ADP to rank against. Also part of the cache
+            key.
+        fmt: Which scoring format to use. Also part of the cache key.
+
+    Returns:
+        dict: Maps each position to a DataFrame labelled by display name, with
+            columns `canonical_id`, `tier`, `adp`, `adp_rank`,
+            `projected_points`, `true_value_rank`, and `diff`. The last two are
+            computed but not currently displayed by either table.
+    """
     return {
         position: ctx.draft_plan_service.rank_candidates(position, platform, fmt).set_index("display_name")
         for position in POSITIONS
     }
 
-# {'POS': DF [canonical_id, adp, projected_points, adp_rank, true_value_rank, dif]}
+# {'POS': DF [canonical_id, tier, adp, adp_rank, projected_points,
+#             true_value_rank, diff]}
 by_name_by_position = get_candidates_by_position(platform, scoring_format)
 
 # All markings for THIS draft, fetched once per rerun
@@ -165,7 +250,7 @@ for tab, position in zip(pos_tab, POSITIONS):
 
         saved = [p for p in plans.get(store_key, []) if p in by_name.index]
 
-        input_col, board_col = st.columns([3, 9])
+        input_col, board_col = st.columns([4, 8])
 
         with input_col:
             with st.container(border=True, height=600):
@@ -188,11 +273,17 @@ for tab, position in zip(pos_tab, POSITIONS):
 
                 # canonical_id comes along only to join the simulation on, then
                 # gets dropped -- it means nothing to a reader.
+                # Sorted by OUR projection rather than by ADP, so the list reads
+                # as your own opinion of the position and the market's number is
+                # the comparison beside it. `na_position="last"` keeps the few
+                # ranked players the analysts don't cover at the bottom instead
+                # of floating them to the top as blanks.
                 all_players = (
-                    by_name[["canonical_id", "adp"]]
-                    .sort_values("adp")
+                    by_name[["canonical_id", "adp", "projected_points", "tier"]]
+                    .sort_values("projected_points", ascending=False, na_position="last")
                     .reset_index()
-                    .rename(columns={"display_name": "Player", "adp": "ADP"})
+                    .rename(columns={"display_name": "Player", "adp": "ADP",
+                                     "projected_points": "Proj", "tier": "Tier"})
                 )
 
                 all_players["ADP"] = all_players["ADP"].map(
@@ -202,6 +293,10 @@ for tab, position in zip(pos_tab, POSITIONS):
                 # outside the simulated pool is UNKNOWN, and showing 0% would say
                 # "certain to be gone", which is the opposite of what it means.
                 all_players["Avail"] = all_players["canonical_id"].map(availability_by_id)
+                # Kept players read 0% available, which alone looks identical to
+                # "certain to be drafted before your turn". This column is what
+                # separates the two.
+                all_players["Kept"] = all_players["canonical_id"].map(kept_by_id).fillna("")
                 all_players = all_players.drop(columns="canonical_id")
 
                 st.dataframe(
@@ -211,10 +306,25 @@ for tab, position in zip(pos_tab, POSITIONS):
                     column_config={
                         # "%.2f" turns the encoded float 1.04 into the text "1.04".
                         "ADP": st.column_config.NumberColumn("ADP", format="%.2f"),
+                        "Proj": st.column_config.NumberColumn(
+                            "Proj", width=70, format="%.0f",
+                            help="Fantasy Footballers blended projection, season "
+                                 "points in this draft's scoring format.",
+                        ),
+                        "Tier": st.column_config.NumberColumn(
+                            "Tier", width=55, format="%d",
+                            help="UDK's tier within this position. 1 is the best "
+                                 "group; a tier break is where the drop-off is.",
+                        ),
                         "Avail": st.column_config.ProgressColumn(
                             "Avail", width=90, min_value=0.0, max_value=1.0,
                             format="percent",
                             help=f"Chance he's still on the board at pick {current_pick}",
+                        ),
+                        "Kept": st.column_config.TextColumn(
+                            "Kept", width=70,
+                            help="Kept by this team in this round, so he never "
+                                 "enters the draft pool at all.",
                         ),
                     },
                 )
@@ -241,14 +351,14 @@ for tab, position in zip(pos_tab, POSITIONS):
 
             # Build the board in priority order (ordered), NOT the raw multiselect order.
             board = by_name.loc[
-                ordered, ["canonical_id", "adp", "true_value_rank", "diff"]
+                ordered, ["canonical_id", "adp", "projected_points", "tier"]
             ].reset_index()
 
             board = board.rename(columns={
                 "display_name": "Player",
                 "adp": "ADP",
-                "true_value_rank": "True Value",
-                "diff": "Diff",
+                "projected_points": "Proj",
+                "tier": "Tier",
             })
 
             board["Move"] = [[":material/arrow_upward: up", ":material/arrow_downward: down"]] * len(board)
@@ -262,6 +372,9 @@ for tab, position in zip(pos_tab, POSITIONS):
             # different answers and must not look alike.
             board["Avail"] = board["canonical_id"].map(availability_by_id)
             board["Cost"] = board["canonical_id"].map(cost_by_id)
+            # A shortlisted player who turns out to be kept is worth flagging
+            # loudly: he is not a plan, he is a mistake in the plan.
+            board["Kept"] = board["canonical_id"].map(kept_by_id).fillna("")
 
             # Which categories show on THIS position's board. A mark with a
             # `position` only appears on that tab; one without shows everywhere.
@@ -291,16 +404,29 @@ for tab, position in zip(pos_tab, POSITIONS):
                     on_click=bump, args=(store_key,),
                     width=60,
                 ),
-                "Player":     st.column_config.TextColumn(board_header("Player"), width="medium"),
-                "ADP":        st.column_config.NumberColumn(board_header("ADP"), width=60, format="%.2f"),
-                "True Value": st.column_config.NumberColumn(board_header("True Value"), width=70),
-                "Diff":       st.column_config.NumberColumn(board_header("Diff"), width=60),
+                "Player": st.column_config.TextColumn(board_header("Player"), width="medium"),
+                "ADP":    st.column_config.NumberColumn(board_header("ADP"), width=60, format="%.2f"),
+                "Proj": st.column_config.NumberColumn(
+                    board_header("Proj"), width=70, format="%.0f",
+                    help="Fantasy Footballers blended projection, season points "
+                         "in this draft's scoring format.",
+                ),
+                "Tier": st.column_config.NumberColumn(
+                    board_header("Tier"), width=55, format="%d",
+                    help="UDK's tier within this position. 1 is the best group; "
+                         "a tier break is where the drop-off is.",
+                ),
                 # A progress bar reads faster than a number for a probability --
                 # you scan for "is this bar short", not for two decimal places.
                 "Avail": st.column_config.ProgressColumn(
                     board_header("Avail"), width=90, min_value=0.0, max_value=1.0,
                     format="percent",
                     help=f"Chance he's still on the board at pick {current_pick}",
+                ),
+                "Kept": st.column_config.TextColumn(
+                    board_header("Kept"), width=70,
+                    help="Kept by this team in this round. He never enters the "
+                         "draft pool, so no pick of yours can reach him.",
                 ),
                 "Cost": st.column_config.NumberColumn(
                     board_header("Cost"), width=70, format="%.0f",

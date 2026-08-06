@@ -60,7 +60,29 @@ CSV_COLUMNS = (
 )
 
 def _scoring_stats(stat_values):
-    """Map this script's stat column names to scoring.py's canonical keys."""
+    """Rename this script's stat columns to the keys scoring.py expects.
+
+    A small translation layer, matching the one in
+    scripts/scrape_espn_projections.py. This file names its columns after
+    Sleeper's vocabulary, while scoring.py uses the app's, and the scoring rules
+    must not be duplicated just to accommodate that.
+
+    Steps:
+        1. Build a new dictionary, reading each value under this script's column
+           name and storing it under the app's canonical name.
+
+    Args:
+        stat_values: The stats keyed by this script's own column names, as built
+            from STAT_KEYS.
+
+    Returns:
+        dict: The same numbers keyed by the names in `scoring.STAT_KEYS`, ready
+            to hand to `scoring.fantasy_points`.
+
+    Raises:
+        KeyError: If any expected stat is missing. Callers default absent stats
+            to 0 before calling, so this should not happen in practice.
+    """
     return {
         "passing_yards": stat_values["pass_yards"],
         "passing_tds": stat_values["pass_tds"],
@@ -75,6 +97,29 @@ def _scoring_stats(stat_values):
 
 
 def fetch_projections(season):
+    """Download the raw projection records from Sleeper's public API.
+
+    This is the same JSON API the Sleeper app itself uses, and it needs no
+    login, which makes it far more reliable than scraping a web page.
+
+    Steps:
+        1. Build the query: regular-season projections, ordered by half-PPR ADP.
+        2. Add one "position[]" entry per position, which is how this API takes a
+           list of values.
+        3. Send the request and raise if the response was an error status.
+        4. Return the parsed JSON body.
+
+    Args:
+        season: Which season's projections to fetch.
+
+    Returns:
+        list: One record per player, in Sleeper's own shape. Each has a "player"
+            key holding the name, team, and eligible positions, and a "stats" key
+            holding the projected numbers and ADP.
+
+    Raises:
+        requests.exceptions.HTTPError: If Sleeper returns an error status.
+    """
     params = [("season_type", "regular"), ("order_by", "adp_half_ppr")]
     params += [("position[]", pos) for pos in POSITIONS]
     response = requests.get(
@@ -88,6 +133,38 @@ def fetch_projections(season):
 
 
 def build_rows(entries):
+    """Turn Sleeper's records into flat rows ready to write as CSV.
+
+    The counterpart to `build_rows` in scripts/scrape_espn_projections.py, and
+    deliberately producing the same columns so the two platforms' files line up.
+
+    Steps:
+        1. Walk every record, pulling out its stats and player details and
+           treating either being absent as empty.
+        2. Skip players with no half-PPR point total, which is how Sleeper
+           represents someone it has not actually projected.
+        3. Choose the player's position from his eligible list, skipping anyone
+           who does not play one this script handles.
+        4. Build the identifying fields, joining the first and last name and
+           defaulting a player with no team to "FA" for free agent.
+        5. Copy each projected stat across under this script's column names,
+           defaulting a missing stat to 0.
+        6. Convert those to the app's vocabulary with `_scoring_stats` above and
+           compute half-PPR and full-PPR points through
+           `scoring.fantasy_points`, plus the per-game figures.
+
+    Args:
+        entries: The raw records from `fetch_projections` above.
+
+    Returns:
+        list: One dictionary per player, with exactly the keys listed in
+            CSV_COLUMNS. Unprojected players and unhandled positions are left
+            out, so this is usually shorter than the input.
+
+    Note:
+        Unlike ESPN, Sleeper publishes genuinely different ADP for half-PPR and
+        full-PPR, so the two ADP columns here really do differ.
+    """
     rows = []
     for entry in entries:
         stats = entry.get("stats") or {}
@@ -127,6 +204,30 @@ def build_rows(entries):
 
 
 def main():
+    """Fetch Sleeper's projections and write them to a CSV in data/.
+
+    The entry point when this file is run from the command line. The output file
+    is named so that `python scripts/load_data.py` picks it up automatically as
+    the 'sleeper_projections' collection.
+
+    Steps:
+        1. Define the command-line options, using this file's module docstring as
+           the help text.
+        2. Download the raw records with `fetch_projections` above and flatten
+           them with `build_rows`.
+        3. Exit with a message if nothing came back, rather than writing an empty
+           file over a good one.
+        4. Sort by half-PPR ADP, treating an ADP of 0 as infinity so unranked
+           players sink to the bottom instead of appearing to be the top picks.
+        5. Write the rows to data/sleeper_projections.csv using CSV_COLUMNS as
+           the header, which also fixes the column order.
+
+    Returns:
+        None: The row count and destination are printed on success.
+
+    Raises:
+        SystemExit: If no projection data was found for the requested season.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--season", type=int, default=2026)
     args = parser.parse_args()

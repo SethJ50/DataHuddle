@@ -41,10 +41,28 @@ FFC_FORMATS = (ScoringFormat.REGULAR, ScoringFormat.HALF_PPR, ScoringFormat.FULL
 
 
 def load_csvs():
-    """
-    Purpose: Wipe-and-replace every collection backed by a CSV in data/.
+    """Replace every MongoDB collection that is backed by a CSV file in data/.
 
-    Returns: None. Prints one line per collection.
+    Walks the data folder rather than taking a hardcoded list, so dropping a new
+    CSV in is all it takes to get it loaded.
+
+    Steps:
+        1. Find every .csv file under data/, including subfolders, sorted so the
+           output order is stable between runs.
+        2. Look at the folders each file sits in and skip anything under a folder
+           named in SKIP_DIRS, which is how data/raw/ stays out.
+        3. Use the filename without its extension as the collection name, so
+           data/ffb/ffb_qb_projections.csv becomes the 'ffb_qb_projections'
+           collection.
+        4. Call `reload_collection_from_csv` from db/loader.py, which wipes that
+           collection and refills it from the file.
+        5. Print how many rows landed.
+
+    Returns:
+        None: Progress is reported by printing one line per collection.
+
+    Raises:
+        KeyError: From the database layer if MONGODB_URI is not set.
     """
     for csv_path in sorted(DATA_DIR.rglob("*.csv")):
         relative_parts = csv_path.relative_to(DATA_DIR).parts[:-1]
@@ -56,18 +74,36 @@ def load_csvs():
 
 
 def load_ffc(year):
-    """
-    Purpose:
-        Pull the current season's FFC ADP and store it two different ways, for two
-        different purposes.
+    """Pull this season's FFC ADP and store it two different ways.
 
-    Parameters:
-        year (int): Season to pull.
+    FFC is the app's only source of draft-position spread, and unlike the other
+    inputs it comes from a live web service rather than a file, so it gets its
+    own step.
+
+    Steps:
+        1. Build the adapter and the snapshot repository, and make sure the
+           history collection's indexes exist before any bulk write.
+        2. For each of the three scoring formats, fetch that format's pool.
+        3. Skip a format the fetch could not return, printing why. A network
+           problem should not stop the rest of the load.
+        4. Tag every row with its format, season, and observation date before the
+           formats are combined, since afterwards there would be no way to tell a
+           PPR row from a standard one.
+        5. Append the same rows to the history collection, which quietly does
+           nothing if the data has not changed since last time.
+        6. If nothing at all came back, leave the existing collection untouched
+           rather than wiping it.
+        7. Otherwise combine every format into one table and replace the
+           collection with it.
+
+    Args:
+        year: Which season to pull.
 
     Returns:
-        int: Total player rows fetched across all formats.
+        int: The total number of player rows fetched across all three formats,
+            or 0 when nothing could be fetched.
 
-    Notes:
+    Note:
         The two destinations are deliberately NOT the same thing:
 
         - `ffc_adp` is CURRENT STATE. Wiped and replaced, exactly like the CSV
@@ -125,6 +161,19 @@ def load_ffc(year):
 
 
 def main():
+    """Run the whole load: CSV files first, then FFC unless told to skip it.
+
+    The entry point when this file is run from the command line.
+
+    Steps:
+        1. Set up the command-line arguments, using this file's own module
+           docstring as the help text.
+        2. Load every CSV with `load_csvs` above.
+        3. Unless --skip-ffc was passed, pull FFC ADP with `load_ffc` above.
+
+    Returns:
+        None: Progress is printed as it goes.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-ffc", action="store_true",
                         help="load CSVs only; make no network calls")

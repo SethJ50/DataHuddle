@@ -24,23 +24,73 @@ import scoring
 
 
 class ProjectionsService:
+    """Turns raw projected stats into fantasy points for the app's players.
+
+    The one place the question "what will this player score?" is answered. It
+    takes the analysts' raw stat lines, applies the scoring rules, matches every
+    player to a canonical id, and narrows the result to the players the app
+    considers in scope.
+
+    Public methods are `get_own_projections`, `disagreement`, and `unresolved`;
+    the underscore-prefixed ones are internal steps of the first.
+    """
+
     def __init__(self, ffb_adapter, identity_repo, roster_service):
+        """Store the three collaborators this service needs.
+
+        All three are handed in rather than built here, so tests can supply
+        fakes and the app can share one cached copy of each.
+
+        Steps:
+            1. Save the projections adapter, the identity repository, and the
+               roster service on the instance. Nothing is loaded yet.
+
+        Args:
+            ffb_adapter: An `FfbProjectionsAdapter` providing the analysts' raw
+                stat projections.
+            identity_repo: A `PlayerIdentityRepo` used to turn the analysts'
+                player names into canonical ids.
+            roster_service: Supplies `canonical_ids()`, the set of players the
+                app considers in scope.
+        """
         self._ffb_adapter = ffb_adapter
         self._identity_repo = identity_repo
         self._roster_service = roster_service
 
     @property
     def analysts(self) -> list:
-        """Which analysts are available to select."""
+        """List which analysts can be selected for a single-analyst projection.
+
+        Used to populate the analyst picker in the UI, so it only ever offers
+        analysts that actually have data behind them.
+
+        Steps:
+            1. Pass through to the adapter's own `analysts` property.
+
+        Returns:
+            list: The analyst names available, such as
+                `["andy", "mike", "jason"]`.
+        """
         return self._ffb_adapter.analysts
 
     def get_own_projections(self, analyst: str = None) -> pd.DataFrame:
-        """
-        Purpose: Our own season-long and per-game fantasy point projections.
+        """Get our own season-long and per-game fantasy point projections.
 
-        Parameters:
-            analyst (str | None): A single analyst's numbers, or None (default)
-                for the blend of all three.
+        The main entry point of this service. Ask for one analyst to see his
+        numbers alone, or leave the argument out to get the blend of all three,
+        which is the app's default projection.
+
+        Steps:
+            1. If a single analyst was named, load his raw stats from the
+               adapter, attach canonical ids with `_resolve` below, and convert
+               the stats to points with `_score` below. That is the whole job.
+            2. Otherwise load every analyst's stats at once, resolve and score
+               them the same way, then collapse the per-analyst rows into one row
+               per player with `_blend` below.
+
+        Args:
+            analyst: A single analyst's name for his numbers alone, or None, the
+                default, for the blend of all three.
 
         Returns:
             pd.DataFrame — one row per player, with canonical_id, the raw stat
@@ -55,7 +105,7 @@ class ProjectionsService:
             RosterService's roster are included, so this stays consistent with
             the rest of the app's player universe.
 
-        Notes:
+        Note:
             Scoring is a LINEAR function of the stat line, so averaging the three
             analysts' points gives exactly the same answer as averaging their
             stats and scoring once. Points are averaged because that also yields
@@ -72,17 +122,32 @@ class ProjectionsService:
         return self._blend(self._score(self._resolve(self._ffb_adapter.load_all())))
 
     def _resolve(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Purpose: Attach canonical_id and restrict to the app's player universe.
+        """Attach canonical player IDs and drop anyone outside the app's roster.
 
-        Parameters:
-            df (pd.DataFrame): Adapter output, with name and position columns.
+        Two filters in one step. Players whose names cannot be matched to a
+        canonical id are dropped because nothing downstream could join them, and
+        players outside the UDK roster are dropped so this service's player set
+        matches the rest of the app's.
+
+        Steps:
+            1. Ask `resolve_many_with_fallback` on the identity repository to
+               turn the analysts' names into canonical ids, passing positions too
+               so two players sharing a name can be told apart.
+            2. Attach those ids as a new column and drop rows where resolution
+               failed.
+            3. Keep only the players whose id appears in the roster service's
+               set of in-scope players.
+
+        Args:
+            df: Adapter output, needing at least `name` and `position` columns
+                alongside the raw stat columns.
 
         Returns:
-            pd.DataFrame with canonical_id added; unresolvable players and
-            players outside the UDK roster are dropped.
+            pd.DataFrame: The same columns plus `canonical_id`, with
+                unresolvable players and players outside the UDK roster removed.
+                Can be noticeably shorter than the input.
 
-        Notes:
+        Note:
             FFB's names are matched the same way every other source is: the
             curated player_id_map first, then an exact name+position match with
             suffix/accent normalization (see PlayerIdentityRepo).
@@ -94,7 +159,34 @@ class ProjectionsService:
         return df[df["canonical_id"].isin(self._roster_service.canonical_ids())]
 
     def _score(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add season and per-game fantasy points for every scoring format."""
+        """Add season and per-game fantasy points for every scoring format.
+
+        Turns raw stat lines into the points those stats are worth. The formula
+        itself lives in scoring.py rather than here, so ingestion scripts and the
+        app cannot drift apart on what a touchdown is worth.
+
+        Steps:
+            1. Copy the table so the caller's version is not modified.
+            2. Pull out the stat columns scoring.py expects, named by
+               `scoring.STAT_KEYS`.
+            3. Call `scoring.fantasy_points_all_formats`, which returns season
+               point totals for each format in one pass.
+            4. For each format, store the season total and then call
+               `scoring.per_game` to divide it across the season's games.
+
+        Args:
+            df: Resolved projections carrying every column named in
+                `scoring.STAT_KEYS`, such as `passing_yards` and `receptions`.
+
+        Returns:
+            pd.DataFrame: The input's columns plus two per scoring format:
+                `fantasy_points_{fmt}_season` and
+                `fantasy_points_{fmt}_per_game`.
+
+        Raises:
+            KeyError: If any stat column named in `scoring.STAT_KEYS` is
+                missing.
+        """
         df = df.copy()
         stats = {key: df[key] for key in scoring.STAT_KEYS}
         for fmt, season_points in scoring.fantasy_points_all_formats(stats).items():
@@ -103,19 +195,37 @@ class ProjectionsService:
         return df
 
     def _blend(self, scored: pd.DataFrame) -> pd.DataFrame:
-        """
-        Purpose: Collapse per-analyst rows into one row per player.
+        """Collapse the per-analyst rows into a single row per player.
 
-        Parameters:
-            scored (pd.DataFrame): Long format, one row per (player, analyst),
-                already scored.
+        Averaging the three analysts gives the app's default projection, and the
+        same pass captures how far apart they were, which is a useful uncertainty
+        signal in its own right.
+
+        Steps:
+            1. Work out which columns hold each format's season points, since
+               those are the ones that get a low/high/spread.
+            2. Choose which columns to average: every numeric one except the
+               identity columns. See the inline comment for why `bye_week` must
+               be excluded despite being a number.
+            3. Group by player and average those numeric columns.
+            4. Count how many rows each player had, which is how many analysts
+               rated him, and merge that in as `n_analysts`.
+            5. For each season-points column, take the minimum and maximum across
+               analysts and attach them as `_low` and `_high`, then subtract to
+               get `_spread`.
+            6. Take one copy of the identity columns per player and merge them
+               back on, since they were held out of the averaging.
+
+        Args:
+            scored: Long-format data, one row per player per analyst, already
+                run through `_score` above.
 
         Returns:
-            pd.DataFrame — one row per canonical_id, carrying the mean of every
-            numeric column plus low/high/spread on each format's season points
-            and an `n_analysts` count.
+            pd.DataFrame: One row per canonical id, carrying the identity
+                columns, the mean of every numeric column, `_low`, `_high`, and
+                `_spread` on each format's season points, and `n_analysts`.
 
-        Notes:
+        Note:
             `spread` is max-minus-min across analysts, not a standard deviation.
             With three observations a standard deviation is barely meaningful,
             whereas the range is exactly the question being asked: how far apart
@@ -152,19 +262,33 @@ class ProjectionsService:
         return labels.merge(blended, on="canonical_id")
 
     def disagreement(self, fmt) -> pd.DataFrame:
-        """
-        Purpose: Where the three analysts disagree most.
+        """Rank players by how much the three analysts disagree about them.
 
-        Parameters:
-            fmt (ScoringFormat): Which scoring format to measure in.
+        A wide spread means the forecasters themselves are unsure, which is a
+        different kind of risk from a player the market cannot price. This is the
+        only place in the app that surfaces it.
+
+        Steps:
+            1. Work out which column holds season points for the requested
+               format.
+            2. Call `get_own_projections` above with no analyst, which produces
+               the blend along with its low, high, and spread columns.
+            3. Keep only players rated by at least two analysts, and narrow to
+               the columns worth displaying.
+            4. Sort by spread, widest disagreement first, and renumber the rows.
+
+        Args:
+            fmt: Which scoring format to measure disagreement in, since the
+                analysts can differ more in one format than another.
 
         Returns:
-            pd.DataFrame with canonical_id, name, position, the blended season
-            points, low, high, spread and n_analysts — sorted by spread, widest
-            first. Players rated by fewer than two analysts are excluded, since
-            a spread of zero across one opinion means nothing.
+            pd.DataFrame: Columns `canonical_id`, `name`, `position`, the blended
+                season points, its `_low`, `_high`, and `_spread`, and
+                `n_analysts` — sorted with the widest disagreement first.
+                Players rated by fewer than two analysts are excluded, since a
+                spread of zero across one opinion means nothing.
 
-        Notes:
+        Note:
             A per-player uncertainty measure independent of ADP spread. Two
             players with identical projections and identical ADP can sit at
             opposite ends of this, and that difference is invisible everywhere
@@ -180,14 +304,25 @@ class ProjectionsService:
         return frame.sort_values(f"{column}_spread", ascending=False).reset_index(drop=True)
 
     def unresolved(self, analyst: str = None) -> list:
-        """
-        Purpose: FFB projection names that couldn't be matched to a canonical_id
-            at all — candidates for a manual player_id_map row.
+        """List projection names that could not be matched to any known player.
 
-        Parameters:
-            analyst (str | None): Check one analyst, or all of them.
+        A diagnostic. Every name here is a player silently missing from the
+        projections, and the fix is normally to add a row to the hand-curated
+        player_id_map.
 
-        Returns: list[str], de-duplicated.
+        Steps:
+            1. Load the raw projections, for one analyst if named or for all of
+               them otherwise.
+            2. Hand the names and positions to `unresolved_with_fallback` on the
+               identity repository, which reports whatever neither the curated
+               mapping nor the exact name match could resolve.
+
+        Args:
+            analyst: Check one analyst's names, or None to check all of them.
+
+        Returns:
+            list: The unmatched names, with duplicates removed. Empty when
+                everything resolved, which is the healthy case.
         """
         df = (self._ffb_adapter.load(analyst) if analyst
               else self._ffb_adapter.load_all())

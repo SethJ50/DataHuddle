@@ -23,20 +23,37 @@ from draft_model.config import MIN_STDEV, PLATFORM_WEIGHT, POOL_MULTIPLIER
 REQUIRED_FFC_COLUMNS = ("ffc_player_id", "name", "position", "adp", "stdev", "high", "low")
 
 def blend_adp(sources: dict, weights: dict) -> pd.Series:
-    """
-    Purpose: Combine ADP from several platforms into one consensus number.
+    """Combine ADP from several platforms into one consensus number per player.
 
-    Parameters:
-        sources (dict[str, pd.Series]): Platform name -> ADP, each Series indexed
-            by canonical_id. They need NOT cover the same players.
-        weights (dict[str, float]): Platform name -> relative weight. These do not
-            need to sum to 1.
+    Different platforms disagree about when a player goes, and no single one is
+    authoritative. This averages them, letting you weight the platform you
+    actually draft on more heavily.
+
+    Steps:
+        1. Return an empty result if no sources were given.
+        2. Build a table from the sources: one column per platform, one row per
+           player, covering every player any platform mentions. Players a
+           platform has no number for come out blank in that column.
+        3. Line the weights up with those columns, treating a platform with no
+           listed weight as weight 0.
+        4. Work out which entries are actually present, and total up only the
+           weights that apply to each player. This is the renormalization step
+           described in the note below.
+        5. Multiply each present value by its weight and sum across platforms.
+        6. Divide by the applicable weight. A total of 0 means no source had the
+           player, so it is turned into NaN first to avoid dividing by zero.
+
+    Args:
+        sources: Maps a platform name to its ADP values, each labelled by
+            canonical player id. The platforms need NOT cover the same players.
+        weights: Maps a platform name to its relative importance. These do not
+            need to add up to 1, since step 6 divides by whatever is present.
 
     Returns:
-        pd.Series: Blended ADP indexed by canonical_id, covering the union of all
-            input indices. NaN for a player no source has.
+        pd.Series: Blended ADP labelled by canonical id, covering every player
+            any source mentioned. NaN for a player no source has.
 
-    Notes:
+    Note:
         Exists as a named function specifically so the weighting is a visible,
         reviewable decision rather than a magic line buried inside build_table.
 
@@ -67,18 +84,32 @@ def blend_adp(sources: dict, weights: dict) -> pd.Series:
 
 def apply_platform_shift(ffc_adp: pd.Series, platform_adp: pd.Series,
                          weight: float = PLATFORM_WEIGHT) -> pd.Series:
-    """
-    Purpose: Nudge FFC's ADP toward the platform you actually draft on.
+    """Nudge FFC's ADP part of the way toward the platform you actually draft on.
 
-    Parameters:
-        ffc_adp (pd.Series): FFC ADP, indexed however the caller likes.
-        platform_adp (pd.Series): Blended platform ADP on the SAME index.
-        weight (float): 0.0 keeps pure FFC; 1.0 goes all the way to the platform.
+    Your leaguemates see your platform's default player list, so it predicts
+    their behavior better than any consensus ranking. But FFC is the only source
+    of spread, so its centre cannot simply be thrown away — hence a partial
+    shift rather than a replacement.
+
+    Steps:
+        1. If there is no platform data, or the weight is zero, hand back a copy
+           of the FFC values untouched.
+        2. Line the platform values up with the FFC ones, so both are labelled
+           the same way.
+        3. Work out the gap between them and scale it by the weight.
+        4. Add that scaled gap to the FFC value. Players missing from the
+           platform side get a gap of 0, leaving them exactly where FFC put them.
+
+    Args:
+        ffc_adp: FFC's ADP values, labelled however the caller likes.
+        platform_adp: Blended platform ADP on the SAME labels.
+        weight: How far to move. 0.0 keeps pure FFC; 1.0 goes all the way to the
+            platform; 0.5 lands halfway.
 
     Returns:
-        pd.Series: Shifted ADP on the same index as ffc_adp.
+        pd.Series: Shifted ADP with the same labels as `ffc_adp`.
 
-    Notes:
+    Note:
         adp_target = ffc_adp + weight * (platform_adp - ffc_adp)
 
         Why a shift instead of just using platform ADP: FFC is the only source of
@@ -99,20 +130,45 @@ def apply_platform_shift(ffc_adp: pd.Series, platform_adp: pd.Series,
 
 def fill_missing_stdev(df: pd.DataFrame, adp_column: str = "adp_target",
                        n_neighbors: int = 20) -> pd.Series:
-    """
-    Purpose: Give every player a usable width, without any trained model.
+    """Give every player a usable draft-position spread, with no trained model.
 
-    Parameters:
-        df (pd.DataFrame): Needs columns position, stdev, high, low, and adp_column.
-            `stdev` is NaN where FFC could not measure a spread (the adapter turns
-            FFC's meaningless 0 into NaN).
-        adp_column (str): Which ADP defines "nearby" -- the shifted target.
-        n_neighbors (int): How many same-position neighbours to average over.
+    "Width" here means how much a player's draft position varies from draft to
+    draft — the standard deviation of his pick number. The simulator needs one
+    for every player, but FFC cannot measure it for everybody, so this fills the
+    gaps using progressively weaker evidence.
+
+    Steps:
+        1. Start from FFC's own spread, converting to numbers and copying so the
+           input table is not modified.
+        2. Estimate a spread from the observed high and low picks, dividing the
+           range by 4, and use it wherever FFC gave nothing and the range is
+           positive.
+        3. Snapshot which rows are usable BEFORE filling any more in, so the
+           result cannot depend on the order rows happen to be visited.
+        4. For each row still missing a spread, gather the usable players at the
+           same position, falling back to all usable players if that position has
+           none at all.
+        5. Measure how far each of those is from this player in ADP, take the
+           closest `n_neighbors`, and use the median of their spreads.
+        6. Apply MIN_STDEV as a hard floor, so nothing escapes with a zero.
+
+    Args:
+        df: The player table. Needs the columns `position`, `stdev`, `high`,
+            `low`, and whatever `adp_column` names. `stdev` is NaN where FFC
+            could not measure a spread, because the adapter turns FFC's
+            meaningless 0 into NaN.
+        adp_column: Which ADP column defines "nearby" for step 5. Defaults to the
+            platform-shifted target.
+        n_neighbors: How many same-position neighbours to take the median over.
 
     Returns:
-        pd.Series: A width for every row, aligned to df.index, guaranteed > 0.
+        pd.Series: A width for every row, lined up with the input table's rows,
+            guaranteed greater than zero.
 
-    Notes:
+    Raises:
+        KeyError: If the table is missing one of the required columns.
+
+    Note:
         THE FALLBACK CHAIN, in order:
           1. FFC's stdev, whenever present. The overwhelming majority -- measured
              on the 2026 pull, only 1 of 246 PPR players needs anything else.
@@ -166,21 +222,47 @@ def fill_missing_stdev(df: pd.DataFrame, adp_column: str = "adp_target",
 def build_table(config, ffc: pd.DataFrame, platform_adp: pd.Series = None,
                 enrichments: dict = None, platform_weight: float = PLATFORM_WEIGHT,
                 pool_multiplier: float = POOL_MULTIPLIER) -> pd.DataFrame:
-    """
-    Purpose: Assemble the one flat table the entire model runs on.
+    """Assemble the one flat table the entire model runs on.
 
-    Parameters:
-        config (DraftConfig): League settings; total_picks sets the pool cap.
-        ffc (pd.DataFrame): One row per player from FfcService.with_canonical_id --
-            ffc_player_id, name, position, team, adp, stdev, high, low,
-            times_drafted, bye, canonical_id (nullable).
-        platform_adp (pd.Series | None): Blended platform ADP indexed by
-            canonical_id, from blend_adp. None keeps pure FFC.
-        enrichments (dict[str, pd.Series] | None): Extra columns to attach by
-            canonical_id, e.g. {"projection": ..., "upside": ..., "risk": ...}.
-            Missing players get NaN; nothing is dropped for lacking them.
-        platform_weight (float): Passed to apply_platform_shift.
-        pool_multiplier (float): Drop players beyond total_picks * this.
+    This is the boundary between messy vendor data and clean model input. Every
+    judgment about how a player's centre and width were derived is made here,
+    once, so the simulator downstream sees only tidy numbers.
+
+    Steps:
+        1. Check that every required FFC column is present, and fail immediately
+           if not.
+        2. Copy the input so nothing done here modifies the caller's table.
+        3. Compute `adp_target`: if platform ADP was supplied, line it up by
+           canonical id and pass both to `apply_platform_shift` above. Otherwise
+           use FFC's ADP as is.
+        4. Fail loudly on any player missing an ADP or a position, BEFORE the
+           pool cap below can quietly discard them — see the inline comment for
+           why the order matters.
+        5. Compute `stdev_target` with `fill_missing_stdev` above, run before the
+           pool cap so deep players still have a full neighbourhood to draw from.
+        6. Drop players whose ADP is beyond the pool cap, since they can never be
+           selected but cost just as much to simulate.
+        7. Attach any enrichment columns by canonical id. These never filter
+           anything; a player lacking one just gets NaN.
+        8. Seed `mu` and `sd` from the targets, ready for calibration to
+           overwrite.
+        9. Sort by `adp_target` and renumber the rows. This is the ONE sort, and
+           the resulting order is frozen for the life of the artifact.
+
+    Args:
+        config: The league settings. Its `total_picks` sets the pool cap.
+        ffc: One row per player from `FfcService.with_canonical_id`, with the
+            columns `ffc_player_id`, `name`, `position`, `team`, `adp`, `stdev`,
+            `high`, `low`, `times_drafted`, `bye`, and a nullable
+            `canonical_id`.
+        platform_adp: Blended platform ADP labelled by canonical id, from
+            `blend_adp` above. None keeps pure FFC.
+        enrichments: Extra columns to attach by canonical id, for example
+            `{"projection": ..., "upside": ..., "risk": ...}`. Missing players
+            get NaN; nothing is dropped for lacking them.
+        platform_weight: Passed straight to `apply_platform_shift`.
+        pool_multiplier: Drop players whose ADP is beyond `total_picks` times
+            this.
 
     Returns:
         pd.DataFrame indexed 0..n-1 (THIS INDEX DEFINES PICKS-MATRIX COLUMN
@@ -201,7 +283,7 @@ def build_table(config, ffc: pd.DataFrame, platform_adp: pd.Series = None,
             adp or no position. Silent NaNs here become NaN board values, which
             sort unpredictably and produce a plausible-looking wrong draft.
 
-    Notes:
+    Note:
         KEYED BY ffc_player_id, NOT canonical_id. The simulator needs only adp,
         stdev and position -- it does not need identity resolution. Team defenses
         can never resolve to an nflreadpy id, and dropping them would push ~27

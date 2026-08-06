@@ -8,6 +8,18 @@ from enum import Enum
 
 
 class Collections:
+    """The name of every MongoDB collection the app reads or writes.
+
+    Used as a namespace rather than something to create an instance of: write
+    `Collections.DRAFTS`, never `Collections()`. Keeping the names here means a
+    collection rename is a one-line change instead of a search across the
+    codebase.
+
+    Note that FFB_QB_PROJECTIONS and FFB_FLEX_PROJECTIONS are templates rather
+    than finished names — they contain `{analyst}` and must be formatted with an
+    analyst's name before use.
+    """
+
     ESPN_PROJECTIONS = "espn_projections"
     SLEEPER_PROJECTIONS = "sleeper_projections"
     YAHOO_DRAFTANALYSIS = "yahoo_draftanalysis"
@@ -38,6 +50,7 @@ class Collections:
     ADP_YAHOO = "adp_yahoo"
     ADP_SLEEPER = "adp_sleeper"
     DRAFT_PLANS = "draft_plans"
+    DRAFT_SESSIONS = "draft_sessions"
 
 MARKING_CATEGORIES = [
     "Safe",
@@ -49,6 +62,16 @@ MARKING_CATEGORIES = [
 ]
 
 class Position(str, Enum):
+    """The positions this app recognizes, in its own canonical spelling.
+
+    Every external source spells some of these differently — "PK" for kicker,
+    "DEF" or "D" for defense — so anything arriving from outside should go
+    through `canonical_position` below before being turned into one of these.
+
+    Inheriting from `str` as well as `Enum` means each value behaves like its own
+    text, so `Position.RB == "RB"` is True.
+    """
+
     QB = "QB"
     RB = "RB"
     WR = "WR"
@@ -63,18 +86,32 @@ POSITION_ALIASES = {
 }
 
 def canonical_position(raw: str) -> str:
-    """
-    Purpose: Translate one source's position spelling into ours.
+    """Translate one source's spelling of a position into the app's own.
 
-    Parameters:
-        raw (str): A position token from any external source, e.g. "PK", "def", " WR ".
+    Different providers name the same positions differently, and letting those
+    variants spread through the codebase would mean every comparison had to know
+    about all of them. Everything from outside passes through here first.
+
+    Steps:
+        1. Trim surrounding whitespace and uppercase the token, so " wr " and
+           "WR" are treated the same.
+        2. Look that up in POSITION_ALIASES, falling back to the cleaned-up token
+           itself when there is no alias.
+
+    Args:
+        raw: A position token from any external source, such as "PK", "def", or
+            " WR ".
 
     Returns:
-        str: The canonical spelling ("K", "DST", "WR"). Unknown tokens are passed
-            through uppercased rather than dropped, so a new position from a
-            source shows up visibly instead of disappearing.
+        str: The canonical spelling, such as "K", "DST", or "WR". An unknown
+            token is passed through uppercased rather than dropped, so a new
+            position from a source shows up visibly instead of disappearing.
 
-    Notes:
+    Raises:
+        AttributeError: If `raw` is not a string. A missing value must be
+            filtered out before calling.
+
+    Note:
         Deliberately NOT returning a Position enum -- some callers (the FFC
         adapter) want a plain string column in a DataFrame. Use Position(...) on
         the result if you need the enum.
@@ -82,11 +119,27 @@ def canonical_position(raw: str) -> str:
     return POSITION_ALIASES.get(raw.strip().upper(), raw.strip().upper())
 
 def parse_positions(raw: str) -> list[Position]:
-    """Split a dual-eligibility position string (Yahoo's "RB,TE") into Positions.
+    """Split a multi-position eligibility string into a list of Positions.
 
-    Unrecognized tokens are skipped rather than raising, since eligibility
-    strings vary by source. Aliasing is handled by canonical_position() so
-    every source's quirks live in one table.
+    Some players are eligible at more than one position, and sources write that
+    as a single comma-separated string such as Yahoo's "RB,TE". This turns it
+    into something the code can actually check against.
+
+    Steps:
+        1. Split the string on commas.
+        2. Run each token through `canonical_position` above to normalize its
+           spelling, then turn it into a Position.
+        3. Skip any token that is not a position this app recognizes, rather than
+           raising, since eligibility strings vary by source.
+
+    Args:
+        raw: A comma-separated eligibility string, such as "RB,TE". A single
+            position with no comma works fine too.
+
+    Returns:
+        list: The recognized positions, in the order they appeared. Can be empty
+            if none of the tokens were recognized, so callers should not assume
+            at least one.
     """
     positions = []
     for token in raw.split(","):

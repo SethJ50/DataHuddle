@@ -53,25 +53,37 @@ SLEEP_SECONDS = 0.5
 
 
 def pull_all(start_year, end_year, adapter):
-    """
-    Purpose:
-        Fetch every (year, format) combination in range, keeping the successes and
-        recording why each failure failed.
+    """Fetch every year and format combination, keeping successes and failures apart.
 
-    Parameters:
-        start_year (int), end_year (int): Inclusive season range.
-        adapter (FfcAdapter): Shares one HTTP session across all requests.
+    Downloading is separated from reporting and writing so that --dry-run can show
+    exactly what would be stored without storing any of it.
+
+    Steps:
+        1. Start two lists, one for successful pulls and one for the misses.
+        2. Loop over every year in the range, and every scoring format within
+           each year.
+        3. Fetch that combination through the adapter.
+        4. Sort the answer into the successes or the misses. A miss records the
+           reason rather than raising, since a season FFC simply has no data for
+           is a normal answer here.
+        5. Pause between requests, because FFC recomputes once a day and asks not
+           to be hammered. This is a one-time job, so there is no reason to rush.
+
+    Args:
+        start_year: The first season to pull, included.
+        end_year: The last season to pull, included.
+        adapter: An `FfcAdapter`, shared so every request reuses one network
+            connection.
 
     Returns:
-        tuple (results, misses) where
-          results -- list of dicts: {year, fmt, ffc_format, pull}. `pull` is an
-                     FfcPull whose .players is the canonical DataFrame
-                     (ffc_player_id, name, position, team, adp, stdev, high, low,
-                     times_drafted, bye) and whose .meta carries total_drafts and
-                     the start_date/end_date observation window.
-          misses  -- list of dicts: {year, fmt, reason}, for the report.
+        tuple: `(results, misses)`. Each entry of `results` is a dictionary with
+            `year`, `fmt`, `ffc_format`, and `pull` — where `pull` is an FfcPull
+            whose `.players` is the canonical table (ffc_player_id, name,
+            position, team, adp, stdev, high, low, times_drafted, bye) and whose
+            `.meta` carries total_drafts and the start_date/end_date observation
+            window. Each entry of `misses` has `year`, `fmt`, and `reason`.
 
-    Notes:
+    Note:
         Never raises on an absent season. "FFC has no 2025 data" is a normal answer
         when looping years, not an error -- FfcPull.ok collapses both of FFC's
         no-data signals (HTTP 400, and HTTP 200 with an empty list) into one flag.
@@ -92,13 +104,27 @@ def pull_all(start_year, end_year, adapter):
 
 
 def report(results, misses):
-    """
-    Purpose: Show exactly what was found before anything is written.
+    """Print exactly what was fetched, before anything is written.
 
-    Parameters: pull_all()'s two return values.
-    Returns: int -- total player rows across all successful pulls.
+    The whole point of --dry-run: see the coverage and the row counts, and decide
+    whether they look right, before committing any of it to the database.
 
-    Notes:
+    Steps:
+        1. Print a header row for the table.
+        2. Walk the successes sorted by year then format, printing the player
+           count, the number of real drafts behind it, and the observation
+           window, while accumulating the total.
+        3. If anything was skipped, list each miss with its reason.
+        4. Print the totals.
+
+    Args:
+        results: The successful pulls, the first value from `pull_all` above.
+        misses: The failures, the second value from `pull_all`.
+
+    Returns:
+        int: The total number of player rows across every successful pull.
+
+    Note:
         This is the whole point of --dry-run. The observation window is worth
         reading: historical rows are 2-4 day snapshots taken at season start, so
         each season contributes ONE datapoint per format, not a time series.
@@ -125,16 +151,29 @@ def report(results, misses):
 
 
 def write(results, repo):
-    """
-    Purpose: Persist every successful pull into adp_snapshots.
+    """Write every successful pull into the snapshot history collection.
 
-    Parameters:
-        results (list[dict]): From pull_all().
-        repo (AdpSnapshotRepo): Target repository.
+    The only step here that changes anything. Called after `report` above, and
+    only when --dry-run was not passed.
 
-    Returns: None. Prints one line per pull.
+    Steps:
+        1. Walk the successes sorted by year then format, so the output reads in
+           order.
+        2. Append each pull to the history, tagging it with its source, season,
+           format, league size, and observation date.
+        3. Turn off the unchanged-payload skip, since every year and format here
+           is a genuinely distinct set of rows.
+        4. Print how many rows were written, split into newly created and
+           updated.
 
-    Notes:
+    Args:
+        results: The successful pulls, the first value from `pull_all` above.
+        repo: The `AdpSnapshotRepo` to write into.
+
+    Returns:
+        None: Progress is reported by printing one line per pull.
+
+    Note:
         Safe to re-run. Each row is upserted on
         (source, season, format, num_teams, player_key, snapshot_date), so a second
         run updates in place rather than duplicating.
@@ -168,6 +207,25 @@ def write(results, repo):
 
 
 def main():
+    """Fetch the historical range, report it, and write it unless told not to.
+
+    The entry point when this file is run from the command line.
+
+    Steps:
+        1. Define the command-line options, using this file's module docstring as
+           the help text.
+        2. Print how many requests are about to be made and how far apart, since
+           this job takes a while on purpose.
+        3. Fetch everything with `pull_all` above and print it with `report`.
+        4. Stop here if --dry-run was passed, or if nothing came back.
+        5. Create the collection's indexes BEFORE writing — see the inline
+           comment for why the order matters.
+        6. Write with `write` above, then print the resulting coverage so the
+           outcome is visible.
+
+    Returns:
+        None: Progress is printed as it goes.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true",
                         help="report coverage and row counts, write nothing")

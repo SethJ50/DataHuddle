@@ -45,16 +45,29 @@ from draft_model.mechanics import snake_order
 
 
 def simulated_mean_pick(picks) -> np.ndarray:
-    """
-    Purpose: Average pick number per player, ignoring drafts where he went undrafted.
+    """Work out each player's average pick number across the simulations.
 
-    Parameters:
-        picks (np.ndarray): (n_sims, n_players) matrix.
+    This is the simulated equivalent of vendor ADP, and calibration's whole job
+    is to make the two agree. Drafts where a player went untaken are left out
+    entirely rather than counted as a very late pick.
+
+    Steps:
+        1. Replace every UNDRAFTED entry with NaN, so it is treated as "no
+           observation" rather than as the number 999.
+        2. Average down each player's column, ignoring those NaNs.
+        3. Silence numpy's "mean of empty slice" warning, which fires for a
+           player drafted in no simulation at all. NaN is the correct answer
+           there, so the warning is just noise.
+
+    Args:
+        picks: The (n_sims, n_players) results matrix from the simulator, where
+            each entry is a pick number or UNDRAFTED.
 
     Returns:
-        np.ndarray float, (n_players,). NaN for a player never drafted in any sim.
+        np.ndarray: One average pick number per player. NaN for a player never
+            drafted in any simulation.
 
-    Notes:
+    Note:
         CONDITIONAL ON BEING DRAFTED, deliberately -- that is how vendors compute
         ADP. A player taken in 10% of drafts at pick 175 has an ADP of 175, not
         some blend of 175 and "never". Calibration compares this against vendor
@@ -70,16 +83,29 @@ def simulated_mean_pick(picks) -> np.ndarray:
 
 
 def simulated_stdev_pick(picks) -> np.ndarray:
-    """
-    Purpose: Spread of pick number per player, ignoring undrafted outcomes.
+    """Measure how much each player's pick number varies across the simulations.
 
-    Parameters:
-        picks (np.ndarray): (n_sims, n_players) matrix.
+    The simulated counterpart to FFC's `stdev`. Calibration compares the two and
+    adjusts the sampler's width until they line up, but only for players it can
+    measure reliably.
+
+    Steps:
+        1. Replace every UNDRAFTED entry with NaN, exactly as
+           `simulated_mean_pick` above does.
+        2. Compute the standard deviation down each player's column, ignoring
+           those NaNs and silencing the empty-slice warning.
+        3. Count how many simulations actually drafted each player.
+        4. Return the spread only for players drafted at least twice, and NaN for
+           the rest — see the inline comment for why 0 would be a trap.
+
+    Args:
+        picks: The (n_sims, n_players) results matrix from the simulator.
 
     Returns:
-        np.ndarray float, (n_players,). NaN for players drafted fewer than twice.
+        np.ndarray: One spread per player, in pick numbers. NaN for players
+            drafted fewer than twice, since one observation cannot have a spread.
 
-    Notes:
+    Note:
         This is TRUNCATED for deep players, and the truncation biases it DOWNWARD.
         Someone drafted in 20% of simulations only contributes his 20% of
         outcomes, all of which sit in a narrow late window -- the drafts where he
@@ -104,16 +130,26 @@ def simulated_stdev_pick(picks) -> np.ndarray:
 
 
 def prob_undrafted(picks) -> np.ndarray:
-    """
-    Purpose: Fraction of simulations in which each player went undrafted.
+    """Work out how often each player went undrafted across the simulations.
 
-    Parameters:
-        picks (np.ndarray): (n_sims, n_players) matrix.
+    A high value means the player is usually still available at the end of the
+    draft. It is also the basis of the reliability weight calibration uses to
+    decide whose statistics it can trust.
+
+    Steps:
+        1. Compare every entry against UNDRAFTED, giving a True/False grid.
+        2. Average down each player's column. Since True counts as 1 and False as
+           0, that average is exactly the fraction of simulations he went
+           untaken.
+
+    Args:
+        picks: The (n_sims, n_players) results matrix from the simulator.
 
     Returns:
-        np.ndarray float, (n_players,) in [0, 1].
+        np.ndarray: One value per player between 0 and 1, where 0 means always
+            drafted and 1 means never drafted.
 
-    Notes:
+    Note:
         Free, because undrafted players need no special handling anywhere: boards
         are drawn for the whole pool, the draft consumes total_picks of them, and
         the rest are simply never taken.
@@ -122,9 +158,23 @@ def prob_undrafted(picks) -> np.ndarray:
 
 
 def draft_rate(picks) -> np.ndarray:
-    """Fraction of simulations in which each player WAS drafted. The complement of
-    prob_undrafted, named separately because it reads better as a reliability
-    weight."""
+    """Work out how often each player WAS drafted across the simulations.
+
+    The exact complement of `prob_undrafted` above, given its own name because
+    it reads better where it is actually used: as a reliability weight deciding
+    whose simulated statistics are trustworthy enough to calibrate against.
+
+    Steps:
+        1. Call `prob_undrafted` above for the fraction never taken.
+        2. Subtract that from 1.
+
+    Args:
+        picks: The (n_sims, n_players) results matrix from the simulator.
+
+    Returns:
+        np.ndarray: One value per player between 0 and 1, where 1 means drafted
+            in every simulation.
+    """
     return 1.0 - prob_undrafted(picks)
 
 
@@ -135,37 +185,64 @@ def draft_rate(picks) -> np.ndarray:
 
 def calibrate_sampler(adp_target, stdev_target, pos_index, config,
                       n_iterations=8, n_sims=2_000, sd_clip=(0.8, 1.25),
-                      alpha=ALPHA, reliability=0.8, rho=RHO, verbose=True):
-    """
-    Purpose: Solve for the sampler parameters that make the simulation reproduce
-        the ADP and spread it was given.
+                      alpha=ALPHA, reliability=0.8, rho=RHO, verbose=True,
+                      keeper_picks=None):
+    """Solve for the sampler settings that make the simulation reproduce its inputs.
 
-    Parameters:
-        adp_target (np.ndarray): Vendor ADP per player -- what the simulation's
-            mean pick should equal.
-        stdev_target (np.ndarray): Vendor spread per player.
-        pos_index (np.ndarray): Position ordinals per player.
-        config (DraftConfig): League settings; supplies the seed.
-        n_iterations (int): Fixed-point passes. Converges in well under ten.
-        n_sims (int): Simulations per pass. Kept low -- precision is not needed
-            while tuning, only a consistent signal.
-        sd_clip (tuple): Floor and ceiling on the per-iteration spread multiplier,
-            so one noisy player cannot swing wildly between passes.
-        alpha (float): Damping on the centre update.
-        reliability (float): Only update `sd` for players drafted in at least this
-            fraction of simulations.
-        rho (float): Manager agreement. Held FIXED -- see Notes.
-        verbose (bool): Print the error trace as it runs.
+    Feeding ADP straight into the sampler does not produce drafts whose average
+    pick equals that ADP, because a player goes to whoever rates him highest.
+    This repeatedly simulates, measures the gap, and nudges the settings until
+    the gap closes — a technique called a fixed-point loop.
+
+    Steps:
+        1. Start `mu` and `sd` at the vendor targets, copying so the caller's
+           arrays are not modified.
+        2. Pick the fixed "core" population used for the error report: players
+           the market expects to be drafted in a league this size. Fixed, because
+           a set that changed between passes would make the trace unreadable.
+           Kept players are excluded from it — see the note below.
+        3. For each pass, run `monte_carlo_sim` from draft_model/engine.py with
+           the current settings and the same keeper picks the real run will use,
+           so calibration is measuring the draft it is actually tuning.
+        4. Measure the results with `simulated_mean_pick`, `simulated_stdev_pick`,
+           and `draft_rate` above.
+        5. Compute the average absolute error over the core population and record
+           it in the trace, printing it too when verbose.
+        6. Update the centre: take the gap between target and simulated ADP, but
+           only for players whose measurement is trustworthy, and move `alpha` of
+           the way there rather than all of it.
+        7. Update the width: compute the ratio of target spread to simulated
+           spread for measurable players, clamp it so one noisy player cannot
+           swing wildly, and apply it with MIN_STDEV as a floor.
+
+    Args:
+        adp_target: Vendor ADP per player — what the simulation's mean pick
+            should end up equalling.
+        stdev_target: Vendor spread per player.
+        pos_index: One position number per player.
+        config: The league settings, which also supply the random seed.
+        n_iterations: How many passes to run. Converges in well under ten.
+        n_sims: Simulations per pass. Kept low — precision is not needed while
+            tuning, only a consistent signal.
+        sd_clip: A (floor, ceiling) pair limiting the per-pass width multiplier.
+        alpha: How far to move toward the target each pass, between 0 and 1.
+        reliability: Only update a player's settings if he was drafted in at
+            least this fraction of simulations.
+        rho: How much managers agree within a draft. Held FIXED — see the note.
+        verbose: Print the error trace as it runs.
+        keeper_picks: Which picks are spent on keepers, as a mapping from an
+            overall pick number to the kept player's column index. Passed
+            straight through to the simulator. Defaults to no keepers.
 
     Returns:
-        tuple (mu, sd, trace):
-            mu, sd -- calibrated sampler parameters. From here on these are the
-                ONLY values passed to the sampler; adp_target and stdev_target
-                become validation references only (invariant 4).
-            trace -- list of per-iteration dicts with the errors, for inspection
-                and for storing in the artifact.
+        tuple: `(mu, sd, trace)`. `mu` and `sd` are the calibrated sampler
+            settings — from here on these are the ONLY values passed to the
+            sampler, and adp_target/stdev_target become validation references
+            only. `trace` is a list of one dictionary per pass holding
+            "iteration", "adp_error", "sd_error", and "n_measurable", for
+            inspection and for storing in the artifact.
 
-    Notes:
+    Note:
         THREE DETAILS THAT MATTER, each of which is easy to omit and quietly
         degrades the result:
 
@@ -208,16 +285,31 @@ def calibrate_sampler(adp_target, stdev_target, pos_index, config,
     # different populations from pass to pass and be unreadable.
     core = adp_target <= config.total_picks
 
+    # Keepers are excluded from BOTH the error metric and the updates below.
+    # A kept player goes at exactly his keeper pick in every simulation, so his
+    # simulated ADP is that pick number and his simulated spread is zero -- not
+    # measurements of anything, just the arithmetic of a fixed assignment.
+    # Scoring him would report a large error nobody can act on, and adjusting his
+    # mu would tune a number the sampler never reads, since he is never selected.
+    keeper_picks = dict(keeper_picks or {})
+    kept = np.zeros_like(core, dtype=bool)
+    if keeper_picks:
+        kept[list(keeper_picks.values())] = True
+    core = core & ~kept
+
     trace = []
     if verbose:
         print(f"{'pass':>4s} {'|adp err|':>10s} {'|sd err|':>10s} {'measurable':>11s}")
 
     for iteration in range(n_iterations):
-        picks = monte_carlo_sim(mu, sd, pos_index, config, n_sims=n_sims, rho=rho)
+        picks = monte_carlo_sim(mu, sd, pos_index, config, n_sims=n_sims, rho=rho,
+                                keeper_picks=keeper_picks)
 
         sim_adp = simulated_mean_pick(picks)
         sim_sd = simulated_stdev_pick(picks)
-        reliable = draft_rate(picks) >= reliability
+        # Parentheses matter: `&` binds tighter than `>=` in Python, so without
+        # them this would compare the draft rate against `reliability & ~kept`.
+        reliable = (draft_rate(picks) >= reliability) & ~kept
 
         scored = core & np.isfinite(sim_adp)
         adp_error = float(np.mean(np.abs(adp_target[scored] - sim_adp[scored])))
@@ -268,28 +360,56 @@ def calibrate_sampler(adp_target, stdev_target, pos_index, config,
 
 def validate_sim(picks, adp_target, stdev_target, config, adp_tolerance=2.0,
                  reliability=0.8, checkpoints=(13, 25, 50, 100, 150),
-                 raise_on_failure=True) -> dict:
-    """
-    Purpose: Assert a completed run is internally consistent and properly calibrated.
+                 raise_on_failure=True, keeper_picks=None) -> dict:
+    """Check that a finished simulation run is consistent and properly calibrated.
 
-    Parameters:
-        picks (np.ndarray): (n_sims, n_players) matrix.
-        adp_target, stdev_target (np.ndarray): The vendor references.
-        config (DraftConfig): League settings.
-        adp_tolerance (float): Maximum acceptable mean absolute ADP error, picks.
-        reliability (float): Players drafted below this rate are excluded from the
+    Five independent checks, run before any output reaches a page. They are the
+    difference between wrong numbers caught in seconds and wrong numbers
+    discovered during a live draft.
+
+    Steps:
+        1. Define a small `record` helper that stores each result and, unless
+           told otherwise, raises on the first failure.
+        2. Check 1, calibration: compare simulated ADP against the target over
+           two populations — the reliably-drafted players, which is the actual
+           gate, and the wider expected-drafted set, reported so a bad run cannot
+           hide behind a favourable subset.
+        3. Check 2, pick count: every single simulation must have drafted exactly
+           `total_picks` players.
+        4. Check 3, unique picks: within a simulation no pick number may repeat.
+           Sampled rather than exhaustive, since a violation would be systematic.
+        5. Check 4, counting identity: by pick k, exactly k-1 players must be
+           gone. Pure arithmetic, and the cheapest real check here.
+        6. Check 5, snake order: rebuild the pick order via `snake_order` from
+           draft_model/mechanics.py and confirm every team owns exactly one pick
+           per round.
+
+    Args:
+        picks: The (n_sims, n_players) results matrix from the simulator.
+        adp_target: The vendor ADP reference, one per player.
+        stdev_target: The vendor spread reference, one per player.
+        config: The league settings.
+        adp_tolerance: The largest acceptable mean absolute ADP error, in picks.
+        reliability: Players drafted below this rate are excluded from the
             calibration check, since their statistics are truncated.
-        checkpoints (tuple): Pick numbers at which to test the counting identity.
-        raise_on_failure (bool): Raise on the first failure. Set False to collect
-            every result for display.
+        checkpoints: The pick numbers at which to test the counting identity.
+        raise_on_failure: Raise on the first failure. Set False to collect every
+            result for display instead.
+        keeper_picks: Which picks were spent on keepers, as a mapping from an
+            overall pick number to the kept player's column index. Used only to
+            exclude those players from the calibration check, since their pick
+            was assigned rather than simulated. The counting checks need no
+            adjustment — see the note.
 
     Returns:
-        dict: check name -> {"passed": bool, "detail": str}.
+        dict: Maps each check name to a dictionary with "passed" (a boolean) and
+            "detail" (a readable explanation, present whether it passed or not).
 
     Raises:
-        AssertionError: If any check fails and raise_on_failure is True.
+        AssertionError: If any check fails and `raise_on_failure` is True. The
+            message names the failing check and its detail.
 
-    Notes:
+    Note:
         Run this before any output reaches a page. These checks are the difference
         between wrong numbers caught in seconds and wrong numbers discovered
         during a live draft.
@@ -302,10 +422,36 @@ def validate_sim(picks, adp_target, stdev_target, config, adp_tolerance=2.0,
         Check 2 tests EVERY simulation, not the maximum. A single short draft
         means the pool ran dry or hard limits locked out the board, and averaging
         it away would hide exactly the run you need to know about.
+
+        KEEPERS NEED NO SPECIAL HANDLING IN CHECKS 2, 3 AND 4, and that is by
+        design rather than by luck. The simulator records a kept player at the
+        pick his team spent on him, so every pick number in the draft is still
+        used exactly once by exactly one player. Had keepers instead been marked
+        with a "gone before the draft" sentinel, all three counting identities
+        would have needed a keeper-aware correction term, and each would have
+        been a place for the arithmetic to go quietly wrong.
     """
     results = {}
 
     def record(name, passed, detail):
+        """Store one check's outcome, and raise immediately if it failed.
+
+        Defined inside `validate_sim` so it can write into the `results`
+        dictionary and read `raise_on_failure` without either being passed in.
+
+        Steps:
+            1. Store the outcome and its explanation under the check's name.
+            2. If failures are meant to raise and this one failed, raise now,
+               skipping the remaining checks.
+
+        Args:
+            name: The check's short name, used as the dictionary key.
+            passed: Whether the check succeeded.
+            detail: A readable explanation, recorded whether it passed or not.
+
+        Raises:
+            AssertionError: If the check failed and `raise_on_failure` is True.
+        """
         results[name] = {"passed": bool(passed), "detail": detail}
         if raise_on_failure and not passed:
             raise AssertionError(f"{name}: {detail}")
@@ -326,8 +472,17 @@ def validate_sim(picks, adp_target, stdev_target, config, adp_tolerance=2.0,
     #       so a genuinely bad run can't hide behind a favourable subset.
     adp_target = np.asarray(adp_target)
     sim_adp = simulated_mean_pick(picks)
-    reliable = draft_rate(picks) >= reliability
-    core = (adp_target <= config.total_picks) & np.isfinite(sim_adp)
+
+    # Kept players are dropped from both populations. Their pick was assigned,
+    # not simulated, so scoring them measures the keeper assignment rather than
+    # the model -- a round-1 keeper whose ADP is 40 would report a 39-pick
+    # "error" that no amount of calibration could or should remove.
+    kept = np.zeros(picks.shape[1], dtype=bool)
+    if keeper_picks:
+        kept[list(keeper_picks.values())] = True
+
+    reliable = (draft_rate(picks) >= reliability) & ~kept
+    core = (adp_target <= config.total_picks) & np.isfinite(sim_adp) & ~kept
 
     error = float(np.mean(np.abs(adp_target[reliable] - sim_adp[reliable])))
     core_error = float(np.mean(np.abs(adp_target[core] - sim_adp[core])))

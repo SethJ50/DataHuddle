@@ -1,3 +1,18 @@
+"""Page showing one NFL team: its projected depth chart, plus your notes on it.
+
+The left column picks the team and holds a free-text scratchpad about it. The
+right column shows a projected depth chart — the best few projected players at
+each position — where each player row can be tagged and annotated inline, and
+the whole set saved at once.
+
+Notes and markings are scoped to a draft, so a draft must be selected in the
+sidebar before anything is editable; without one the tables render read-only.
+
+Like every file in pages/, this is a script rather than a set of functions:
+Streamlit runs it top to bottom each time the page is shown, or any widget on
+it is changed.
+"""
+
 import streamlit as st
 from streamlit_state import get_app_context
 from scoring import ScoringFormat
@@ -109,19 +124,52 @@ with right:
             with depth_1_col:
                 @st.cache_data(show_spinner="Loading projections...")
                 def load_projection_board():
-                    # get_own_projections(): per-player FFB projection rows — includes
-                    # name, team (FFB abbr), position (QB/RB/WR/TE), canonical_id, and
-                    # fantasy_points_<fmt>_season / _per_game for ALL three formats.
+                    """Load every player's blended projection, reusing it between reruns.
+
+                    Streamlit re-runs this whole file whenever any widget changes,
+                    and rebuilding the projections each time would make every
+                    click slow. The `@st.cache_data` decorator above keeps the
+                    result and hands back the same table instantly.
+
+                    Steps:
+                        1. Ask the projections service for the blend of all three
+                           analysts, which covers every scoring format at once.
+
+                    Returns:
+                        pd.DataFrame: One row per player, with `canonical_id`,
+                            `name`, `team` (an FFB abbreviation), `position`, and
+                            `fantasy_points_<fmt>_season` plus `_per_game` for
+                            all three scoring formats.
+                    """
                     proj = ctx.projections_service.get_own_projections()
                     return proj
 
                 proj = load_projection_board()
 
                 def top_by_position(df, position, n, points_col):
-                    # Purpose: the n highest-projected players at one position for a team.
-                    # Parameters: df (already filtered to one team), position ("QB"/"RB"/...),
-                    #             n (slot count from ROSTER_SLOTS), points_col (chosen format's season pts).
-                    # Returns: DataFrame slice, sorted best-first, at most n rows.
+                    """Pick the best few projected players at one position.
+
+                    Used once per position to build the depth chart, so each
+                    table shows the players most likely to actually start.
+
+                    Steps:
+                        1. Keep only the rows at the requested position.
+                        2. Sort by the chosen format's projected points, highest
+                           first.
+                        3. Keep at most `n` rows. `head` returns fewer without
+                           complaint if the team has fewer players there.
+
+                    Args:
+                        df: Projection rows already filtered to a single team.
+                        position: Which position to select, such as "QB".
+                        n: How many players to keep, from ROSTER_SLOTS.
+                        points_col: The name of the projected-points column for
+                            the scoring format the user selected.
+
+                    Returns:
+                        pd.DataFrame: At most `n` rows, best projection first.
+                            Empty if the team has nobody at that position.
+                    """
                     return (
                         df[df["position"] == position]
                         .sort_values(points_col, ascending=False)

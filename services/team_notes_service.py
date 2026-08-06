@@ -20,19 +20,30 @@ class TeamNotesService:
     """
 
     def get(self, draft_id, team_abbr):
-        """
-        Purpose: Load the saved note for one team in one draft.
+        """Load the saved note for one team in one draft.
 
-        Parameters:
-            draft_id: the draft this note belongs to.
-            team_abbr: the team's abbreviation (the per-team key).
+        Called when the team profile page renders, to fill in whatever the user
+        last wrote about that team.
+
+        Steps:
+            1. Call `find_one` from db/documents.py, matching on both the draft
+               and the team abbreviation.
+            2. If a record came back, return its `notes` text. Otherwise return
+               an empty string, since "no note yet" is normal.
+
+        Args:
+            draft_id: The draft this note belongs to.
+            team_abbr: The team's abbreviation, such as "KC". Together with the
+                draft id this identifies the note.
 
         Returns:
-            str -- the saved note text, or "" if nothing has been saved yet.
+            str: The saved note text, or an empty string if nothing has been
+                saved yet. Never None, so the caller can pass it straight to a
+                text box.
 
-        Notes:
-            Returns just the text (not the whole document) because the UI only
-            ever needs a string to seed a text_area.
+        Note:
+            Returns just the text rather than the whole record, because the UI
+            only ever needs a string to seed a text area.
         """
         doc = find_one(
             Collections.TEAM_NOTES,
@@ -41,20 +52,24 @@ class TeamNotesService:
         return doc["notes"] if doc else ""
 
     def save(self, draft_id, team_abbr, notes):
-        """
-        Purpose: Create or update the note for one team in one draft.
+        """Save the note for one team in one draft, creating it if needed.
 
-        Parameters:
-            draft_id: the draft this note belongs to.
-            team_abbr: the team's abbreviation (the per-team key).
-            notes: the free-text note to persist.
+        Backs the save button on the team profile page. The caller does not need
+        to know whether a note already exists.
+
+        Steps:
+            1. Call `upsert` from db/documents.py, matching on the draft and team
+               pair and storing that same pair alongside the note text.
+            2. That match decides the outcome: an existing note is overwritten,
+               and a missing one is created.
+
+        Args:
+            draft_id: The draft this note belongs to.
+            team_abbr: The team's abbreviation, such as "KC".
+            notes: The free-text note to save. Pass an empty string to clear it.
 
         Returns:
-            None.
-
-        Notes:
-            upsert keys on (draft_id, team_abbr), so re-saving overwrites the
-            same document rather than creating duplicates.
+            None: The write either succeeded or raised.
         """
         upsert(
             Collections.TEAM_NOTES,

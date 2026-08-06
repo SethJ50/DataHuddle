@@ -1,3 +1,15 @@
+"""Page showing one player: his photo, your notes about him, and his game log.
+
+Two halves. The narrow left column identifies the player and holds the tags and
+notes you have written about him, which are saved per draft so the same player
+can be a target in one league and a fade in another. The wide right column shows
+his week-by-week stats, with the columns chosen to suit his position.
+
+Like every file in pages/, this is a script rather than a set of functions:
+Streamlit runs it top to bottom each time the page is shown, or any widget on
+it is changed.
+"""
+
 import streamlit as st
 
 from streamlit_state import get_app_context
@@ -7,6 +19,8 @@ from registry import MARKING_CATEGORIES
 
 ctx = get_app_context()
 
+# The dropdown shows names but the rest of the app works in ids, so both
+# directions of the mapping are needed.
 names_by_id = ctx.roster_service.player_names() # {canonical_id: display_name}
 id_by_name = {name: cid for cid, name in names_by_id.items()}
 sorted_names = sorted(id_by_name)
@@ -38,6 +52,9 @@ with left:
         else:
             saved = ctx.player_markings_service.get(draft["draft_id"], canonical_id)
 
+            # A saved tag whose category has since been removed from the registry
+            # would make the multiselect raise, so only still-valid ones are
+            # pre-checked.
             valid_defaults = [c for c in saved["categories"] if c in MARKING_CATEGORIES]
             dropped = [c for c in saved["categories"] if c not in MARKING_CATEGORIES]
 
