@@ -1,3 +1,15 @@
+"""Page showing ESPN, Yahoo, and Sleeper ADP side by side for every player.
+
+Comparing platforms is how you spot a player one site ranks far higher than the
+others, which is where draft-day value tends to hide. ADP is shown as
+ROUND.PICK for your league size rather than as a raw pick number, since "3.04"
+is far easier to act on than "28".
+
+Like every file in pages/, this is a script rather than a set of functions:
+Streamlit runs it top to bottom each time the page is shown, or any widget on
+it is changed.
+"""
+
 import streamlit as st
 
 from streamlit_state import get_app_context
@@ -10,6 +22,25 @@ ctx = get_app_context()
 
 @st.cache_data(show_spinner="Comparing ADP across ESPN, Yahoo, and Sleeper...")
 def get_comparison_data(fmt: ScoringFormat):
+    """Load the ADP comparison table, reusing the result between reruns.
+
+    Streamlit re-runs this whole file on every widget change, so without the
+    `@st.cache_data` decorator above, changing the position filter would rebuild
+    the entire comparison from the database. The decorator remembers the result
+    per scoring format and returns it instantly the next time.
+
+    Steps:
+        1. Ask the comparison service to build the table for this scoring format.
+
+    Args:
+        fmt: Which scoring format to compare in. This is also the cache key, so
+            each format is computed once and then reused.
+
+    Returns:
+        pd.DataFrame: One row per in-scope player with `canonical_id`,
+            `display_name`, `headshot_url`, `position`, `espn_adp`, `yahoo_adp`,
+            and `sleeper_adp`.
+    """
     return ctx.adp_comparison_service.compare(fmt)
 
 st.title("ADP Platform Comparison")

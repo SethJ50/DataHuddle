@@ -219,3 +219,64 @@ def test_batching_does_not_change_results():
     many = monte_carlo_sim(mu, sd, pos_index, config, n_sims=24, batch_size=6,
                            rng=np.random.default_rng(99))
     assert np.array_equal(one, many)
+
+
+def test_batching_does_not_change_results_with_per_sim_state():
+    # The version above passes state shared by every simulation, which numpy
+    # broadcasts happily however the batches are cut. The in-draft tool passes a
+    # row PER SIMULATION, and that has to be sliced alongside the boards -- left
+    # whole, a batch of 6 receives the state of all 24 and the run dies inside
+    # the pick loop with a broadcasting error that names no argument.
+    config = make_config(num_teams=12, num_rounds=5)
+    mu, sd, pos_index = make_pool(100, seed=21)
+
+    rng = np.random.default_rng(5)
+    drafted = rng.random((24, 100)) < 0.2          # a different board per sim
+    counts = np.zeros((24, 12, len(POSITIONS)), dtype=np.int16)
+
+    one = monte_carlo_sim(mu, sd, pos_index, config, n_sims=24, batch_size=24,
+                          already_drafted=drafted, roster_counts=counts)
+    many = monte_carlo_sim(mu, sd, pos_index, config, n_sims=24, batch_size=6,
+                           already_drafted=drafted, roster_counts=counts)
+    assert np.array_equal(one, many)
+
+
+def test_each_simulation_respects_its_own_already_drafted_row():
+    # Slicing the right rows matters, not just slicing something: sim 0's mask
+    # must govern sim 0. Give two simulations disjoint blocked players and check
+    # neither drafts the player it was told is gone.
+    config = make_config(num_teams=2, num_rounds=3)
+    mu, sd, pos_index = make_pool(20, seed=22)
+
+    drafted = np.zeros((4, 20), dtype=bool)
+    drafted[:2, 0] = True        # sims 0,1 cannot have player 0
+    drafted[2:, 1] = True        # sims 2,3 cannot have player 1
+
+    picks = monte_carlo_sim(mu, sd, pos_index, config, n_sims=4, batch_size=2,
+                            already_drafted=drafted)
+
+    assert (picks[:2, 0] == UNDRAFTED).all()
+    assert (picks[2:, 1] == UNDRAFTED).all()
+
+
+def test_a_single_row_of_state_is_applied_to_every_simulation():
+    # The in-draft tool has ONE real board state and many simulations of what
+    # happens next, so one row standing in for all of them is the common case.
+    config = make_config(num_teams=2, num_rounds=3)
+    mu, sd, pos_index = make_pool(20, seed=23)
+
+    drafted = np.zeros((1, 20), dtype=bool)
+    drafted[0, 3] = True
+
+    picks = monte_carlo_sim(mu, sd, pos_index, config, n_sims=6, batch_size=2,
+                            already_drafted=drafted)
+    assert (picks[:, 3] == UNDRAFTED).all()
+
+
+def test_state_with_the_wrong_number_of_rows_says_so():
+    config = make_config(num_teams=2, num_rounds=3)
+    mu, sd, pos_index = make_pool(20, seed=24)
+
+    with pytest.raises(ValueError, match="already_drafted has 3 rows"):
+        monte_carlo_sim(mu, sd, pos_index, config, n_sims=6, batch_size=2,
+                        already_drafted=np.zeros((3, 20), dtype=bool))

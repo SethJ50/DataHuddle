@@ -10,6 +10,7 @@ browser session.
 
 from registry import Collections
 from repositories.collection_repo import CollectionRepo
+from repositories.dfs_read_repo import DfsReadRepo
 from repositories.nfl_read_repo import NflReadRepo
 from repositories.player_directory import PlayerDirectory
 from repositories.player_identity_repo import PlayerIdentityRepo
@@ -29,7 +30,61 @@ from services.draft_sim_service import DraftSimService
 
 
 class AppContext:
-    def __init__(self, seasons: list):
+    """Builds and holds every repository, adapter, and service the app uses.
+
+    This is the app's "composition root": the one place that decides which
+    concrete object gets plugged into which. Everything else takes its
+    collaborators as arguments and never constructs them, which is what keeps the
+    rest of the codebase testable with fakes.
+
+    Build one of these at startup and pass it around. Every attribute is a
+    finished, ready-to-use service; pages reach them as `ctx.roster_service` and
+    so on.
+    """
+
+    def __init__(self, seasons: list, dfs_seasons: list = None):
+        """Wire up the whole object graph, in dependency order.
+
+        Nothing here touches the network or the database. Every repository loads
+        lazily on first use, so building this is fast — the slow part is the
+        first page that actually asks for data.
+
+        The order below is not arbitrary: each thing is built after whatever it
+        depends on.
+
+        Steps:
+            1. Build the nflreadpy repository and the player directory on top of
+               it, since player identity underpins everything else.
+            2. Build the identity repository, which needs both the curated
+               mapping collection and that directory.
+            3. Build the UDK rankings adapter and the roster service, which
+               together define the app's player universe. These come before
+               anything that has to filter down to it.
+            4. Build the three ADP adapters and the comparison service over them.
+            5. Build the projections adapter, giving it one QB and flex
+               repository pair per analyst, and the projections service over it.
+            6. Build the draft plan service, which needs the roster, the ADP
+               comparison, and the projections.
+            7. Build the three services that only talk to MongoDB and so need no
+               collaborators at all.
+            8. Build the FFC repository and service, the app's only source of
+               draft-position spread.
+            9. Build the simulation service, since it depends on several of the
+               above.
+            10. Build the Daily Fantasy repository. It depends on nothing else
+                and loads its own, shorter set of seasons.
+
+        Args:
+            seasons: Which NFL seasons of game stats to make available, as a list
+                of years. Only affects game logs; the player and team reference
+                tables are not season-scoped.
+            dfs_seasons: Which seasons the Daily Fantasy pages load. Deliberately
+                separate from `seasons` and normally shorter, because those pages
+                read play-by-play data, which costs far more per season than a
+                game log does. Left out, it falls back to `seasons`, which is
+                correct but slower than it needs to be -- pass `DFS_SEASONS` from
+                streamlit_state.py.
+        """
         self.nfl_read_repo = NflReadRepo(seasons)
         self.player_directory = PlayerDirectory(self.nfl_read_repo)
 
@@ -104,3 +159,9 @@ class AppContext:
             self.adp_comparison_service,
             self.projections_service,
         )
+        # Daily Fantasy's own data loader. Kept apart from `nfl_read_repo`
+        # above because the two halves of the app want different sources over
+        # different seasons -- season-long wants many years of game logs, while
+        # DFS wants a few years of play-by-play, snap counts and expected
+        # points. Nothing loads until a DFS page asks for it.
+        self.dfs_read_repo = DfsReadRepo(dfs_seasons or seasons)

@@ -1,8 +1,17 @@
 streamlit==1.60.0
+# Streamlit already pins altair (>=4,<7), but presentation/charts.py imports it
+# directly. Declared so that dependency is visible rather than accidental.
+altair
 pymongo
 pandas
 numpy
 nflreadpy
+# nflreadpy hands back Polars frames, and repositories/dfs_read_repo.py narrows
+# play-by-play while it is still one -- that is what keeps a 372 MB table down to
+# 19 MB. Declared so the dependency is visible rather than accidental.
+polars
+# Backs the string dtype the DFS tables are stored in. Same reasoning.
+pyarrow
 requests
 
 # Dev / test only

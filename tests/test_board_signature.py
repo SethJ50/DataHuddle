@@ -48,7 +48,7 @@ def draft_with(**changes):
     ("num_teams", 10),
     ("num_rounds", 16),
     ("scoring_format", "half_ppr"),
-    ("keepers", ["00-0034796"]),
+    ("keepers", [{"team": 4, "round": 3, "canonical_id": "00-0034796"}]),
     ("third_round_reversal", True),
     # Deliberately EXCLUDED from the fingerprint because they don't change the
     # simulation -- but they do change the board that gets loaded, so the cache

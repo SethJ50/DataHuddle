@@ -31,25 +31,47 @@ UNRESOLVABLE_BY_DESIGN = ("DST",)
 
 
 class FfcService:
-    """Reads current FFC ADP and attaches canonical_id where one can be found."""
+    """Reads current FFC ADP and attaches canonical_id where one can be found.
+
+    The bridge between FFC's own player ids and the rest of the app's. Its
+    defining behavior is that resolution failure is not fatal: rows keep their
+    place in the table with a blank canonical id, for the reasons in the module
+    docstring above.
+    """
 
     def __init__(self, ffc_repo, identity_repo):
-        """
-        Parameters:
-            ffc_repo (FfcRepo): Source of the current-season FFC table.
-            identity_repo (PlayerIdentityRepo): Does the name -> canonical_id
-                resolution, using the curated player_id_map first and an exact
-                name+position match as fallback.
+        """Store the data source and the name resolver this service needs.
+
+        Steps:
+            1. Save both collaborators on the instance. Nothing is read yet.
+
+        Args:
+            ffc_repo: An `FfcRepo`, the source of the current-season FFC table.
+            identity_repo: A `PlayerIdentityRepo`, which does the name to
+                canonical id resolution using the curated player_id_map first and
+                an exact name plus position match as fallback.
         """
         self._ffc_repo = ffc_repo
         self._identity_repo = identity_repo
 
     def with_canonical_id(self, fmt: ScoringFormat) -> pd.DataFrame:
-        """
-        Purpose: The current FFC table with a canonical_id column attached.
+        """Get the current FFC table with a canonical player ID column attached.
 
-        Parameters:
-            fmt (ScoringFormat): Which scoring format's pool to return.
+        The main read of this service, and the input to the draft model's table
+        builder. Every FFC row survives; the id is an addition, never a filter.
+
+        Steps:
+            1. Ask the FFC repository for the current table in the requested
+               scoring format.
+            2. Return early if nothing has been loaded yet.
+            3. Resolve FFC's player names to canonical ids with
+               `resolve_many_with_fallback` on the identity repository, passing
+               positions so two players sharing a name can be told apart.
+            4. Attach the result as a new column, keeping every row.
+
+        Args:
+            fmt: Which scoring format's player pool to return. FFC publishes a
+                genuinely different pool for each.
 
         Returns:
             pd.DataFrame -- every FFC row for that format, in ADP order:
@@ -69,25 +91,33 @@ class FfcService:
         return df.assign(canonical_id=canonical_id)
 
     def resolution_report(self, fmt: ScoringFormat) -> dict:
-        """
-        Purpose:
-            Summarize how well FFC joined to the app's player universe, splitting
-            the failures into "expected" and "worth your time".
+        """Summarize how well FFC's players joined to the app's player universe.
 
-        Parameters:
-            fmt (ScoringFormat): Which format's pool to check.
+        A diagnostic that splits the failures into two groups: the ones that can
+        never resolve and the handful actually worth fixing. Without that split
+        the real problems get buried.
+
+        Steps:
+            1. Call `with_canonical_id` above for the resolved table.
+            2. If nothing was loaded, return a zeroed report with empty tables so
+               the caller's code path stays the same.
+            3. Find the rows where resolution failed.
+            4. Split those by whether the position is in UNRESOLVABLE_BY_DESIGN,
+               which currently means team defenses.
+            5. Return the totals alongside both groups.
+
+        Args:
+            fmt: Which scoring format's pool to check.
 
         Returns:
-            dict:
-                total (int)        -- rows in the FFC pool
-                resolved (int)     -- rows that got a canonical_id
-                expected (df)      -- unresolved rows at positions that cannot
-                                      resolve by construction (team defenses)
-                actionable (df)    -- unresolved SKILL players. These are the only
-                                      ones worth a manual player_id_map row.
-            Both frames carry name, position, team, adp.
+            dict: Four keys. "total" is how many rows were in the FFC pool,
+                "resolved" how many got a canonical id, "expected" a DataFrame of
+                unresolved rows at positions that cannot resolve by construction,
+                and "actionable" a DataFrame of unresolved skill players — the
+                only ones worth a manual player_id_map row. Both DataFrames carry
+                `name`, `position`, `team`, and `adp`.
 
-        Notes:
+        Note:
             The split exists so the actionable list stays readable. Lumping team
             defenses in with genuine misses buries the handful of real problems
             under a few dozen rows that will never resolve no matter what you do.

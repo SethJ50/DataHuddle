@@ -45,22 +45,59 @@ UDK_KDST_COLUMNS = ["Name", "Position", "Team", "Bye Week", "Rank",
 
 
 def raw_header(path):
-    """The header line exactly as written, before pandas de-duplicates it."""
+    """Read a CSV's header line exactly as written, duplicates and all.
+
+    This deliberately does NOT use pandas. pandas renames a repeated column such
+    as the second `YDS` to `YDS.1` as it reads, which would hide the very
+    duplication this script needs to check.
+
+    Steps:
+        1. Open the file. The "utf-8-sig" encoding quietly strips the invisible
+           marker character Excel writes at the start of its exports.
+        2. Read only the first line.
+        3. Split it on commas and trim whitespace and quotes off each name.
+
+    Args:
+        path: The CSV file to read.
+
+    Returns:
+        list: The column names in file order, including any repeats.
+
+    Raises:
+        FileNotFoundError: If the file does not exist. Callers check first.
+    """
     with open(path, encoding="utf-8-sig") as handle:
         return [c.strip().strip('"') for c in handle.readline().strip().split(",")]
 
 
 def check(path, expected, required=True):
-    """
-    Purpose: Verify one CSV exists and has exactly the expected header order.
+    """Verify one CSV exists and has exactly the expected columns, in order.
 
-    Parameters:
-        path (Path): File to check.
-        expected (list[str]): Header names in order. May contain duplicates.
-        required (bool): If False, a missing file is reported as optional.
+    Order is the point. A file with the right columns in the wrong order loads
+    without any error and silently attributes receiving yards to rushing, so this
+    calls that case out specifically.
+
+    Steps:
+        1. Work out a short label for printing, relative to the project root.
+        2. If the file is absent, report it as missing or optional and return
+           accordingly — an absent optional file is not a failure.
+        3. Read the real header with `raw_header` above and compare it to the
+           expected list, order included.
+        4. On a mismatch, check whether the same names are merely reordered, and
+           if so say so explicitly, since that is the dangerous case.
+        5. Print both lists so the difference is visible.
+        6. On a match, count the rows with pandas and report the file as fine.
+
+    Args:
+        path: The CSV file to check.
+        expected: The column names in the order they must appear. May contain
+            duplicates, which is intentional for the FFB exports.
+        required: When False, a missing file is reported as optional and still
+            counts as a pass.
 
     Returns:
-        bool: True if the file is present and correct.
+        bool: True if the file is usable — present and correctly ordered, or
+            absent but optional.
     """
     label = path.relative_to(PROJECT_ROOT)
 
@@ -85,6 +122,27 @@ def check(path, expected, required=True):
 
 
 def main():
+    """Check every expected data file and report what load_data would pick up.
+
+    The entry point when this file is run from the command line. Run it before
+    scripts/load_data.py, since a bad load overwrites a good collection.
+
+    Steps:
+        1. Check each analyst's QB and flex projection files against their
+           expected headers, combining the results with `&=` so one failure makes
+           the whole group fail.
+        2. Check the four UDK skill-position ranking files.
+        3. Check the K and DST rankings, marked optional because they use a
+           different export format and the model works without them.
+        4. List every CSV load_data would pick up alongside the collection name
+           each would become, so a misplaced file is easy to spot.
+        5. If any required file failed, print a warning about loading.
+
+    Returns:
+        None: Results are printed. Note this does NOT set a non-zero exit code on
+            failure, so it is a report to read rather than something to gate a
+            script on.
+    """
     print("Fantasy Footballers projections (one QB + one flex file per analyst):")
     ffb_ok = True
     for analyst in ANALYSTS:
