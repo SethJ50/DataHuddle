@@ -159,6 +159,43 @@ def load_sim_board(ctx, draft, year=2026):
         return None, str(exc)
     return _cached_board(ctx, draft["draft_id"], year, signature)
 
+@st.cache_data(show_spinner="Loading platform ADP...")
+def load_platform_adp(_ctx, platform, fmt_value):
+    """Look up where one platform drafts every player, as a lookup table.
+
+    Building the comparison touches all three ADP adapters and the identity
+    mapping, so it is far too slow to redo whenever a checkbox is ticked. The
+    `@st.cache_data` decorator above keeps the result per platform and scoring
+    format.
+
+    Steps:
+        1. Ask the ADP comparison service for its table, rebuilding the
+           ScoringFormat enum from the stored string.
+        2. Pick out the one column belonging to this platform.
+        3. Return an empty lookup for a platform name that has no column, so an
+           unrecognised value leaves the ADP blank rather than taking a page down.
+
+    Args:
+        _ctx: The shared AppContext. The LEADING UNDERSCORE tells Streamlit not
+            to hash it, which is required: it holds live database handles that
+            cannot be hashed, and it is a process-wide singleton anyway.
+        platform: Where the league drafts: "espn", "yahoo", or "sleeper". Part of
+            the cache key.
+        fmt_value: The scoring format as its stored string, such as "half_ppr".
+            Part of the cache key.
+
+    Returns:
+        dict: Maps a canonical player id to his ADP on that platform, as an
+            overall pick number. A player that platform does not rank is simply
+            absent, so callers should use `.get` rather than square brackets.
+    """
+    # 1 row per in-scope player -- canonical_id, display_name, headshot_url,
+    # position, espn_adp, yahoo_adp, sleeper_adp.
+    comparison = _ctx.adp_comparison_service.compare(ScoringFormat(fmt_value))
+    column = f"{platform}_adp"
+    if column not in comparison.columns:
+        return {}
+    return dict(zip(comparison["canonical_id"], comparison[column]))
 
 def draft_selector(ctx, page_key):
     """Draw the sidebar draft picker, and return whichever draft is selected.

@@ -17,7 +17,8 @@ import streamlit as st
 from streamlit_state import get_app_context
 from scoring import ScoringFormat
 
-from ui_helpers import draft_selector, FORMAT_LABELS, adp_to_round_pick, load_sim_board
+from ui_helpers import (draft_selector, FORMAT_LABELS, adp_to_round_pick,
+                        load_sim_board, load_platform_adp)
 from registry import MARKING_CATEGORIES
 from presentation.marks import mark_column_config
 
@@ -127,42 +128,6 @@ with right:
 
                 proj = load_projection_board()
 
-                @st.cache_data(show_spinner="Loading platform ADP...")
-                def load_platform_adp(platform, fmt_value):
-                    """Look up where one platform drafts every player, as a lookup table.
-
-                    Building the comparison touches all three platforms and the
-                    identity mapping, so it is far too slow to redo whenever a
-                    checkbox is ticked. The `@st.cache_data` decorator above keeps
-                    the result per platform and scoring format.
-
-                    Steps:
-                        1. Ask the ADP comparison service for its table, rebuilding
-                           the ScoringFormat enum from the stored string.
-                        2. Pick out the one column belonging to this platform.
-                        3. Return an empty lookup for a platform name that has no
-                           column, so an unrecognised value leaves the ADP blank
-                           rather than taking the page down.
-
-                    Args:
-                        platform: Where the league drafts: "espn", "yahoo", or
-                            "sleeper". Also part of the cache key.
-                        fmt_value: The scoring format as its stored string, such as
-                            "half_ppr". Also part of the cache key.
-
-                    Returns:
-                        dict: Maps a canonical player id to his ADP on that
-                            platform, as an overall pick number. A player that
-                            platform does not rank is simply absent.
-                    """
-                    # 1 row per in-scope player -- canonical_id, display_name,
-                    # headshot_url, position, espn_adp, yahoo_adp, sleeper_adp.
-                    comparison = ctx.adp_comparison_service.compare(ScoringFormat(fmt_value))
-                    column = f"{platform}_adp"
-                    if column not in comparison.columns:
-                        return {}
-                    return dict(zip(comparison["canonical_id"], comparison[column]))
-
                 def top_by_position(df, position, n, points_col):
                     """Pick the best few projected players at one position.
 
@@ -203,7 +168,7 @@ with right:
                     cats_by_id  = {m["canonical_id"]: set(m.get("categories", [])) for m in marks}
                     notes_by_id = {m["canonical_id"]: m.get("notes", "")          for m in marks}
 
-                    plat_adp_by_id = load_platform_adp(draft["platform"], fmt_value)
+                    plat_adp_by_id = load_platform_adp(ctx, draft["platform"], fmt_value)
 
                     # One cache entry shared with Draft Plan and Sim Viewer. A missing
                     # simulation is normal here, not an error -- the column goes blank.

@@ -35,6 +35,7 @@ the cost-of-waiting chart entirely. They really are "everything else".
 """
 
 from draft_model.config import POSITIONS
+import html
 
 # Solid hues, for marks that sit ON the surface -- bars, dots, legend swatches.
 # Assigned in POSITIONS order and never cycled: a fifth hue is not invented, it
@@ -147,6 +148,42 @@ def position_legend_html():
 
     return ('<div style="font-size:0.8rem;opacity:0.8">'
             + "&nbsp;&nbsp;".join(parts) + "</div>")
+
+def position_badge_html(position):
+    """Build a small coloured pill showing one player's position.
+
+    Used where a position needs to read at a glance rather than as one word in a
+    sentence — the player profile's subtitle, for instance. Colour is the same
+    one the draft board and the charts use, so a running back is the same hue
+    everywhere in the app.
+
+    Steps:
+        1. Look up the translucent tint for this position, falling back to the
+           neutral used for K and DST so an unrecognised position still renders.
+        2. Look up the solid hue with `position_color` above, for the border.
+        3. Build an inline span carrying both.
+
+    Args:
+        position: A position name such as "RB".
+
+    Returns:
+        str: HTML for `st.markdown(..., unsafe_allow_html=True)`.
+
+    Note:
+        The BACKGROUND is the translucent tint and the TEXT colour is inherited,
+        which is what lets one badge work on both the light and dark surface with
+        no theme check. Filling it with the solid hue instead would need light
+        text on some positions and dark text on others — the light palette's
+        yellow and magenta both fall below 3:1 against white.
+    """
+    tint = POSITION_TINTS.get(position, POSITION_TINTS["K"])
+    return (
+        f'<span style="display:inline-block;background:{tint};'
+        f'border:1px solid {position_color(position)};border-radius:4px;'
+        f'padding:0.05rem 0.45rem;font-size:0.8rem;font-weight:600;'
+        f'line-height:1.4">{html.escape(str(position))}</span>'
+    )
+
 
 
 RANK_HUE = "#5a6b7a"
