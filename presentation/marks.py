@@ -16,10 +16,15 @@ page turns those into widgets. That keeps this testable without a browser.
 
 from registry import MARKING_CATEGORIES
 
-# Fallback width in pixels for a mark column that does not name its own. An
-# emoji header needs a little more room than a bare checkbox, because Streamlit
-# also draws a sort caret in the header.
+# Fallback widths in pixels for a mark column that does not name its own.
+#
+# TWO OF THEM, because an editable table needs more room than a read-only one.
+# st.data_editor draws a column-type icon into every header, which competes with
+# the heading for the same few pixels; st.dataframe draws no such icon. One width
+# for both modes therefore has to be either too wide for the read-only tables or
+# too cramped for the editable ones.
 DEFAULT_MARK_WIDTH = 40
+EDITABLE_MARK_WIDTH = 60
 
 # Per-mark display config, keyed by the registry category name -- which is also
 # the DataFrame column name every page uses, so a saved value round-trips
@@ -28,7 +33,11 @@ DEFAULT_MARK_WIDTH = 40
 #   header   -> what the column heading SHOWS. An emoji, or a short string for
 #               anything an emoji would not say clearly.
 #   color    -> background tint for the cell when the mark is checked.
-#   width    -> column width in pixels. Optional; DEFAULT_MARK_WIDTH otherwise.
+#   width    -> width in pixels on a READ-ONLY table. Optional; falls back to
+#               DEFAULT_MARK_WIDTH.
+#   editable_width -> width in pixels on an EDITABLE table. Optional; falls back
+#               to EDITABLE_MARK_WIDTH. Only worth setting for a mark whose
+#               heading is unusually wide.
 #   help     -> the hover tooltip. Optional, and defaults to the category name.
 #               THIS IS WHAT MAKES AN EMOJI HEADER READABLE -- an unlabelled
 #               icon is a guess until you hover it, so do not leave it off a
@@ -111,7 +120,7 @@ def visible_marks(position=None):
     return visible
 
 
-def mark_column_config(position=None):
+def mark_column_config(position=None, editable=False):
     """Build the display settings for each mark column, ready for Streamlit.
 
     Returns plain dictionaries rather than widgets, so this module never has to
@@ -121,12 +130,20 @@ def mark_column_config(position=None):
 
     Steps:
         1. Ask `visible_marks` above which marks apply to this position.
-        2. For each, read its heading, tooltip and width out of MARK_STYLE,
-           falling back to the category name and DEFAULT_MARK_WIDTH so a newly
+        2. Choose which width applies: the editable preset for a table the user
+           can type into, the read-only one otherwise. See `editable` below for
+           why the two differ.
+        3. For each mark, read its heading, tooltip and width out of MARK_STYLE,
+           falling back to the category name and the chosen preset so a newly
            added mark renders sensibly before anyone has styled it.
 
     Args:
         position: The position whose table this is, or None for all marks.
+        editable: True when these columns are going into an `st.data_editor`,
+            False for a read-only `st.dataframe`. It only changes the WIDTH.
+            An editable table draws a column-type icon inside every header,
+            which crowds out the heading at the narrow read-only width, so the
+            editable preset is deliberately wider.
 
     Returns:
         dict: Maps each column name to the keyword arguments for
@@ -136,12 +153,17 @@ def mark_column_config(position=None):
                 for column, settings in mark_column_config("RB").items():
                     column_config[column] = st.column_config.CheckboxColumn(**settings)
     """
+    # Which override key and which fallback apply, decided once rather than
+    # inside the loop.
+    width_key = "editable_width" if editable else "width"
+    fallback = EDITABLE_MARK_WIDTH if editable else DEFAULT_MARK_WIDTH
+
     settings = {}
     for category in visible_marks(position):
         spec = MARK_STYLE.get(category, {})
         settings[category] = {
             "label": spec.get("header", category),
             "help": spec.get("help", category),
-            "width": spec.get("width", DEFAULT_MARK_WIDTH),
+            "width": spec.get(width_key, fallback),
         }
     return settings

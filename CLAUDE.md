@@ -21,8 +21,8 @@ Every function, method, and class must have a docstring. Use Google-style format
 3. **Steps**: a numbered, plain-English walkthrough of what happens inside. Whenever a step calls another function in this project, name it and say in a few words what it's for.
 4. **Args / Returns / Raises**: describe each in beginner terms, not just types.
 
-### Inline Comment Style
-Include inline comments as you see fit. Typically, keep these as concise and to the point as possible, in terms a beginning programmer can understand. Scenarios often applicable for inline comments:
+### Inline / Around Code Comment Style
+Include inline / around code comments as you see fit. Typically, keep these as concise and to the point as possible, in terms a beginning programmer can understand. Scenarios often applicable for inline comments:
 1. IMPORTANT: Whenever you use a function to get data, describe the form of that data
 2. Separation of components within a UI
 3. If there is a non-intuitive Python call of some sort, explain what it does
