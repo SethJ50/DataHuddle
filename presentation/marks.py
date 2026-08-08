@@ -30,8 +30,11 @@ EDITABLE_MARK_WIDTH = 60
 # the DataFrame column name every page uses, so a saved value round-trips
 # without translation.
 #
-#   header   -> what the column heading SHOWS. An emoji, or a short string for
-#               anything an emoji would not say clearly.
+#   emoji    -> an emoji for this mark, where one says it clearly. Optional.
+#               Doubles as `header` below when that is not set separately.
+#   header   -> what a TABLE COLUMN heading shows. Optional; falls back to the
+#               emoji, then to the category name. Set it explicitly only for a
+#               mark that has no emoji and needs a short string instead.
 #   color    -> background tint for the cell when the mark is checked.
 #   width    -> width in pixels on a READ-ONLY table. Optional; falls back to
 #               DEFAULT_MARK_WIDTH.
@@ -45,39 +48,24 @@ EDITABLE_MARK_WIDTH = 60
 #   position -> restricts the mark to one position's tab. Absent means it shows
 #               everywhere.
 MARK_STYLE = {
-    "Safe": {
-        "header": "👍",
-        "color": "#3b82f6",                                  # blue
-        "help": "Safe — a floor you can rely on.",
-    },
-    "Upside": {
-        "header": "📈",
-        "color": "#eab308",                                  # yellow
-        "help": "Upside — a ceiling worth reaching for.",
-    },
-    "Love": {
-        "header": "❤️",
-        "color": "#22c55e",                                  # green
-        "help": "Love — you want him on your team.",
-    },
-    "Like": {
-        "header": "✅",
-        "color": "#86efac",                                  # lighter green
-        "help": "Like — happy to take him at the right price.",
-    },
+    "Safe":   {"emoji": "👍", "color": "#3b82f6", "help": "Safe — a floor you can rely on."},
+    "Upside": {"emoji": "📈", "color": "#eab308", "help": "Upside — a ceiling worth reaching for."},
+    "Love":   {"emoji": "❤️", "color": "#22c55e", "help": "Love — you want him on your team."},
+    "Like":   {"emoji": "✅", "color": "#86efac", "help": "Like — happy to take him at the right price."},
     "Uncertain Backfield": {
-        "header": "BF?",
-        "color": "#a855f7",                                  # purple
+        "header": "BF?",                      # no emoji says this clearly
+        "color": "#a855f7",
         "help": "Uncertain Backfield — the touches are not settled.",
-        "position": "RB"
+        "position": "RB",
     },
     "New Top 12 Receiver": {
         "header": "T12",
-        "color": "#a855f7",                                  # purple
+        "color": "#a855f7",
         "help": "New Top 12 Receiver — a breakout into the top tier.",
-        "position": "WR"
+        "position": "WR",
     },
 }
+
 
 # Derived colour map, keyed by COLUMN NAME (which is the category name). Handed
 # straight to `highlight_true` in presentation/st_tables.py, which paints a cell
@@ -119,6 +107,66 @@ def visible_marks(position=None):
             visible.append(category)
     return visible
 
+def mark_emoji(category):
+    """Get one mark's emoji, or an empty string when it has none.
+
+    Some marks say what they are in a single symbol; "Uncertain Backfield" does
+    not, and gets a short text heading instead. Anywhere the FULL name is already
+    on screen, the emoji is decoration to sit beside it — and returning "" rather
+    than a placeholder is what lets a caller add it unconditionally.
+
+    Steps:
+        1. Look the category up in MARK_STYLE and read its `emoji`.
+        2. Return an empty string when there isn't one.
+
+    Args:
+        category: A marking category name.
+
+    Returns:
+        str: The emoji, or "" for a mark that has none.
+    """
+    return MARK_STYLE.get(category, {}).get("emoji", "")
+
+
+def mark_header(category):
+    """Get the short heading a TABLE COLUMN shows for one mark.
+
+    A column is too narrow for "New Top 12 Receiver", so it shows a symbol or a
+    short string instead, with `mark_help` supplying the meaning on hover.
+
+    Steps:
+        1. Use the explicit `header` when the mark sets one.
+        2. Otherwise use its emoji, which is the heading for most marks.
+        3. Otherwise fall back to the category name, so a mark nobody has styled
+           yet still renders as something readable.
+
+    Args:
+        category: A marking category name.
+
+    Returns:
+        str: The heading to show, such as "👍" or "BF?".
+    """
+    spec = MARK_STYLE.get(category, {})
+    return spec.get("header") or spec.get("emoji") or category
+
+
+def mark_help(category):
+    """Get the hover tooltip explaining one mark.
+
+    An emoji heading is a guess until you hover it, so every mark carries a
+    sentence saying what it means.
+
+    Steps:
+        1. Look the category up in MARK_STYLE and read its `help`.
+        2. Fall back to the category name, which at least names the mark.
+
+    Args:
+        category: A marking category name.
+
+    Returns:
+        str: The tooltip text.
+    """
+    return MARK_STYLE.get(category, {}).get("help", category)
 
 def mark_column_config(position=None, editable=False):
     """Build the display settings for each mark column, ready for Streamlit.
@@ -162,8 +210,8 @@ def mark_column_config(position=None, editable=False):
     for category in visible_marks(position):
         spec = MARK_STYLE.get(category, {})
         settings[category] = {
-            "label": spec.get("header", category),
-            "help": spec.get("help", category),
+            "label": mark_header(category),
+            "help": mark_help(category),
             "width": spec.get(width_key, fallback),
         }
     return settings

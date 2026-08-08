@@ -27,7 +27,7 @@ from draft_model.queries import (
     replacement_value,
 )
 from draft_model.table import blend_adp, build_table
-from draft_model.calibrate import simulated_mean_pick
+from draft_model.calibrate import simulated_mean_pick, simulated_stdev_pick
 
 # Weighted toward the platform the league actually drafts on -- the default list
 # a platform shows in-app anchors real leaguemates far more than consensus does.
@@ -149,6 +149,34 @@ class DraftBoard:
         mean_pick = simulated_mean_pick(self.artifact.picks)
         mean_pick[self.kept_mask()] = np.nan
         return mean_pick
+
+    @cached_property
+    def simulated_stdev(self):
+        """Work out how much each player's pick number varied across the simulations.
+
+        The width that goes with `simulated_adp` above. One number says where a
+        player typically goes; this says how reliably — and a range built from the
+        two is far more useful for planning than a single pick number.
+
+        Cached for the same reason `simulated_adp` is: it reads the whole picks
+        matrix, and the page showing it re-runs on every click.
+
+        Steps:
+            1. Call `simulated_stdev_pick` from draft_model/calibrate.py, which
+               measures the spread down each player's column while ignoring the
+               drafts he went untaken in.
+            2. Blank out the kept players, exactly as `simulated_adp` does — a
+               keeper's column is a single repeated pick number, so its spread is
+               zero, which would read as "goes at exactly this pick, every time".
+
+        Returns:
+            np.ndarray: One spread in picks per player, in table row order. NaN
+                for a kept player, and for anyone drafted in fewer than two
+                simulations, where a spread cannot be measured.
+        """
+        spread = simulated_stdev_pick(self.artifact.picks)
+        spread[self.kept_mask()] = np.nan
+        return spread
 
     def availability(self, target_picks=None) -> pd.DataFrame:
         """Build the main table: who survives to each of your picks, and at what cost.
