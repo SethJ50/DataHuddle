@@ -51,7 +51,7 @@ with scoring_picker:
     # choice would suggest otherwise.
     if plot.uses_scoring:
         scoring = st.segmented_control(
-            "Scoring", [DfsScoring.FANDUEL, DfsScoring.PPR],
+            "Scoring", list(DfsScoring),
             default=DfsScoring.FANDUEL, key="dfs_scoring", required=True,
             label_visibility="collapsed",
         )
@@ -147,10 +147,13 @@ if frame.empty:
     st.info("Nothing matches those filters.", icon=":material/filter_alt_off:")
     st.stop()
 
-# `theme=None` MATTERS. Streamlit restyles Altair charts with its own theme by
-# default, which overrides styling the chart set for itself -- and controlling
-# exactly that is the only reason to use Altair here rather than st.scatter_chart.
-st.altair_chart(plot.chart(frame, **for_chart), width="stretch", theme=None)
+plot_col, table_col = st.columns([6, 6])
+
+with plot_col:
+    # `theme=None` MATTERS. Streamlit restyles Altair charts with its own theme by
+    # default, which overrides styling the chart set for itself -- and controlling
+    # exactly that is the only reason to use Altair here rather than st.scatter_chart.
+    st.altair_chart(plot.chart(frame, **for_chart), width="stretch", theme=None)
 
 if plot.reading:
     st.caption(plot.reading)
@@ -163,43 +166,45 @@ if plot.reading:
 # have -- so one config covers every plot and none of them needs a special case.
 ID_COLUMNS = ("player_id",)
 
-with st.expander(f"The numbers — {len(frame)} rows", expanded=False):
-    st.dataframe(
-        frame.drop(columns=[c for c in ID_COLUMNS if c in frame.columns]),
-        hide_index=True, width="stretch", height=420,
-        column_config={
-            "name": st.column_config.TextColumn("Player", width=160),
-            "position": st.column_config.TextColumn("Pos", width=55),
-            "team": st.column_config.TextColumn("Team", width=60),
-            "games": st.column_config.NumberColumn("G", width=45, format="%d"),
-            "actual": st.column_config.NumberColumn("Actual", format="%.1f"),
-            "expected": st.column_config.NumberColumn("Expected", format="%.1f"),
-            "actual_per_game": st.column_config.NumberColumn("Act/g", format="%.1f"),
-            "expected_per_game": st.column_config.NumberColumn("Exp/g", format="%.1f"),
-            "gap_per_game": st.column_config.NumberColumn(
-                "Gap/g", format="%+.1f",
-                help="Actual minus expected, per game. Positive means he scored "
-                     "more than his opportunities were worth.",
-            ),
-            # Team tendencies
-            "pass_rate": st.column_config.NumberColumn("Pass%", format="%.1f%%"),
-            "proe": st.column_config.NumberColumn(
-                "PROE", format="%+.1f",
-                help="Pass rate over expected, in percentage points. Positive "
-                     "means they throw more than a typical team would in the "
-                     "same spots."),
-            "seconds_per_play": st.column_config.NumberColumn("Sec/play", format="%.1f"),
-            "plays_per_game": st.column_config.NumberColumn("Plays/g", format="%.1f"),
-            "red_zone_trips_per_game": st.column_config.NumberColumn(
-                "RZ/g", format="%.2f", help="Drives reaching inside the 20."),
-            "neutral_plays": st.column_config.NumberColumn("Neutral", format="%d"),
-            # Defensive allowances
-            "plays_faced": st.column_config.NumberColumn("Faced", format="%d"),
-            "epa_per_play": st.column_config.NumberColumn(
-                "EPA/play", format="%+.3f",
-                help="Expected points added allowed. Higher means the defence "
-                     "gives up more ground."),
-            "points_allowed": st.column_config.NumberColumn("FP allowed", format="%.0f"),
-            "points_per_play": st.column_config.NumberColumn("FP/play", format="%.3f"),
-        },
-    )
+with table_col:
+
+    with st.expander(f"The numbers — {len(frame)} rows", expanded=False):
+        st.dataframe(
+            frame.drop(columns=[c for c in ID_COLUMNS if c in frame.columns]),
+            hide_index=True, width="stretch", height=420,
+            column_config={
+                "name": st.column_config.TextColumn("Player", width=160),
+                "position": st.column_config.TextColumn("Pos", width=55),
+                "team": st.column_config.TextColumn("Team", width=60),
+                "games": st.column_config.NumberColumn("G", width=45, format="%d"),
+                "actual": st.column_config.NumberColumn("Actual", format="%.1f"),
+                "expected": st.column_config.NumberColumn("Expected", format="%.1f"),
+                "actual_per_game": st.column_config.NumberColumn("Act/g", format="%.1f"),
+                "expected_per_game": st.column_config.NumberColumn("Exp/g", format="%.1f"),
+                "gap_per_game": st.column_config.NumberColumn(
+                    "Gap/g", format="%+.1f",
+                    help="Actual minus expected, per game. Positive means he scored "
+                        "more than his opportunities were worth.",
+                ),
+                # Team tendencies
+                "pass_rate": st.column_config.NumberColumn("Pass%", format="%.1f%%"),
+                "proe": st.column_config.NumberColumn(
+                    "PROE", format="%+.1f",
+                    help="Pass rate over expected, in percentage points. Positive "
+                        "means they throw more than a typical team would in the "
+                        "same spots."),
+                "seconds_per_play": st.column_config.NumberColumn("Sec/play", format="%.1f"),
+                "plays_per_game": st.column_config.NumberColumn("Plays/g", format="%.1f"),
+                "red_zone_trips_per_game": st.column_config.NumberColumn(
+                    "RZ/g", format="%.2f", help="Drives reaching inside the 20."),
+                "neutral_plays": st.column_config.NumberColumn("Neutral", format="%d"),
+                # Defensive allowances
+                "plays_faced": st.column_config.NumberColumn("Faced", format="%d"),
+                "epa_per_play": st.column_config.NumberColumn(
+                    "EPA/play", format="%+.3f",
+                    help="Expected points added allowed. Higher means the defence "
+                        "gives up more ground."),
+                "points_allowed": st.column_config.NumberColumn("FP allowed", format="%.0f"),
+                "points_per_play": st.column_config.NumberColumn("FP/play", format="%.3f"),
+            },
+        )

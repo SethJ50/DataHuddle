@@ -372,3 +372,67 @@ def defensive_allowance_chart(frame, play_kind="rush", dark=None):
                                 opacity=0.7).encode(y="mean(points_per_play):Q")
 
     return (vertical + horizontal + labels).properties(height=470)
+
+
+def weekly_tendency_chart(frame, team, measure="proe", dark=None):
+    """Track one team's play-calling week by week, against the league.
+
+    A season average hides a team that changed midway through. This shows the
+    weekly figure with the league's own average behind it, so a shift is
+    visible as a shift rather than having to be inferred from one number.
+
+    Steps:
+        1. Pick the colours for the theme in use.
+        2. Draw the league's weekly average as a quiet grey line, from the same
+           rows -- it is an aggregate of them, not a second table.
+        3. Draw the chosen team's line over it, in the accent colour.
+        4. Mark each of that team's weeks with a point, so a bye reads as a gap
+           rather than as a straight line through it.
+
+    Args:
+        frame: The table from `weekly_tendencies`, holding EVERY team -- the
+            league average is computed from it, so passing one team's rows would
+            draw that team twice.
+        team: Which team to highlight.
+        measure: `"proe"` or `"pass_rate"`.
+        dark: Force a palette instead of detecting one. Mainly for tests.
+
+    Returns:
+        alt.LayerChart: Ready for `st.altair_chart(..., width="stretch",
+            theme=None)`.
+
+    Note:
+        Every layer reads the one frame, the team's line through a filter and
+        the league's through an aggregate. See `EVERY_LAYER_SHARES_THE_DATA` at
+        the top of this module for why that is not optional.
+    """
+    use_dark = dark if dark is not None else is_dark_theme()
+    accent = BAR_COLOR_DARK if use_dark else BAR_COLOR
+
+    titles = {"proe": "Pass rate over expected (percentage points)",
+              "pass_rate": "Neutral pass rate"}
+    base = alt.Chart(frame)
+    axis = alt.Y(f"{measure}:Q", title=titles.get(measure, measure),
+                 scale=alt.Scale(zero=False))
+
+    league = base.mark_line(color=LABEL_COLOR, strokeDash=[4, 4],
+                            strokeWidth=1.5, opacity=0.8).encode(
+        x=alt.X("week:O", title="Week"),
+        y=alt.Y(f"mean({measure}):Q", title=titles.get(measure, measure),
+                scale=alt.Scale(zero=False)),
+    )
+
+    mine = base.transform_filter(alt.datum.team == team)
+    line = mine.mark_line(color=accent, strokeWidth=2.5).encode(
+        x=alt.X("week:O", title="Week"), y=axis)
+    dots = mine.mark_circle(color=accent, size=60).encode(
+        x=alt.X("week:O"), y=axis,
+        tooltip=[
+            alt.Tooltip("week:O", title="Week"),
+            alt.Tooltip("pass_rate:Q", title="Neutral pass rate", format=".1%"),
+            alt.Tooltip("proe:Q", title="Over expected", format="+.1f"),
+            alt.Tooltip("neutral_plays:Q", title="Neutral plays"),
+        ],
+    )
+
+    return (league + line + dots).properties(height=260)

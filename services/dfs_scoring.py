@@ -27,13 +27,22 @@ class DfsScoring(str, Enum):
     Attributes:
         FANDUEL: FanDuel's scoring. The default, since it is the site these pages
             are built for.
+        DRAFTKINGS: DraftKings' scoring. Full points per reception like the
+            source, but more forgiving about turnovers and it pays yardage
+            bonuses -- see `YARDAGE_BONUSES` below.
         PPR: Full points-per-reception, which is what the underlying data arrives
             in. Kept because it is the untouched source, and because comparing
             against it is how you sanity-check the conversion.
     """
 
     FANDUEL = "FanDuel"
+    DRAFTKINGS = "DraftKings"
     PPR = "PPR"
+
+    # From Python 3.11, printing a str-based enum member gives "DfsScoring.
+    # FANDUEL" rather than "FanDuel". These members go straight into widget
+    # labels and captions, so they have to read as their own value.
+    __str__ = str.__str__
 
 
 @dataclass(frozen=True)
@@ -49,18 +58,32 @@ class DfsScoringRules:
         reception_points: Points per catch. 1.0 in the source data, 0.5 on
             FanDuel.
         interception_points: Points per interception thrown, negative. -2.0 in
-            the source data, -1.0 on FanDuel. THIS IS THE ONE PEOPLE FORGET --
-            see the module note in `rescore` below.
+            the source data, -1.0 on FanDuel and DraftKings. THIS IS THE ONE
+            PEOPLE FORGET -- see the module note in `rescore` below.
+        fumble_points: Points per fumble lost, negative. -2.0 in the source data
+            and on FanDuel, -1.0 on DraftKings.
+        pays_yardage_bonuses: Whether the site pays a flat bonus for a big
+            yardage game. DraftKings does; nobody else here does.
     """
 
     reception_points: float
     interception_points: float
+    fumble_points: float = -2.0
+    pays_yardage_bonuses: bool = False
 
 
 DFS_SCORING_RULES: dict[DfsScoring, DfsScoringRules] = {
     DfsScoring.PPR: DfsScoringRules(
         reception_points=SCORING_RULES[ScoringFormat.FULL_PPR].reception_points,
         interception_points=SCORING_RULES[ScoringFormat.FULL_PPR].interception_points,
+    ),
+    DfsScoring.DRAFTKINGS: DfsScoringRules(
+        # A catch is worth the same full point the source already gives.
+        reception_points=SCORING_RULES[ScoringFormat.FULL_PPR].reception_points,
+        # Both sites are gentler on turnovers than the standard formats.
+        interception_points=-1.0,
+        fumble_points=-1.0,
+        pays_yardage_bonuses=True,
     ),
     DfsScoring.FANDUEL: DfsScoringRules(
         # Half a point per catch, the same value the season-long half-PPR format
@@ -74,6 +97,24 @@ DFS_SCORING_RULES: dict[DfsScoring, DfsScoringRules] = {
     ),
 }
 """What each supported system pays for the two events they disagree about."""
+
+
+YARDAGE_BONUSES = (
+    ("rush_yards_gained", 100, 3.0),
+    ("rec_yards_gained", 100, 3.0),
+    ("pass_yards_gained", 300, 3.0),
+)
+"""DraftKings' flat bonuses: what yardage column, what threshold, how many points.
+
+Applied to ACTUAL points only, and deliberately not to expected ones. A bonus is
+all-or-nothing at a threshold, so its expected value is three points times the
+CHANCE of clearing it -- and no column here carries that chance. Estimating it
+would put the only modelled number in the app inside a figure everything else is
+compared against.
+
+The cost of leaving it out is stated where it shows: a heavy-yardage player's gap
+between actual and expected runs a point or two high. See `rescore` below.
+"""
 
 
 SOURCE_SCORING = DfsScoring.PPR
@@ -95,17 +136,18 @@ INTERCEPTION_ADJUSTED = "pass"
 UNADJUSTED = "rush"
 
 
-def points_delta(scoring, receptions=0.0, interceptions=0.0):
+def points_delta(scoring, receptions=0.0, interceptions=0.0, fumbles=0.0):
     """Work out how far one player's points move when the scoring changes.
 
     The single place the conversion arithmetic lives, so the actual and expected
     numbers can never be converted by two subtly different rules.
 
     Steps:
-        1. Look up what the target system pays per catch and per interception.
-        2. Look up the same two values for the scoring the data arrives in.
+        1. Look up what the target system pays per catch, per interception and
+           per lost fumble.
+        2. Look up the same three values for the scoring the data arrives in.
         3. Multiply each difference by how many of that event happened, and add
-           the two together.
+           them together.
 
     Args:
         scoring: Which system to convert to, a `DfsScoring` member.
@@ -113,6 +155,7 @@ def points_delta(scoring, receptions=0.0, interceptions=0.0):
             Expected receptions are fractional, which is fine -- nothing here
             assumes a whole number.
         interceptions: How many interceptions were thrown. Same again.
+        fumbles: How many fumbles were lost. Same again.
 
     Returns:
         The amount to ADD to the source's points. Negative when converting to
@@ -128,8 +171,11 @@ def points_delta(scoring, receptions=0.0, interceptions=0.0):
 
     per_reception = target.reception_points - source.reception_points
     per_interception = target.interception_points - source.interception_points
+    per_fumble = target.fumble_points - source.fumble_points
 
-    return per_reception * receptions + per_interception * interceptions
+    return (per_reception * receptions
+            + per_interception * interceptions
+            + per_fumble * fumbles)
 
 
 def rescore(frame, scoring=DfsScoring.FANDUEL):
@@ -148,8 +194,11 @@ def rescore(frame, scoring=DfsScoring.FANDUEL):
         3. Shift the receiving points by the reception difference, using actual
            catches for the actual points and expected catches for the expected
            points.
-        4. Shift the passing points by the interception difference, the same way.
-        5. Rebuild each total by adding its three parts back together.
+        4. Shift the passing points by the interception difference, and the
+           rushing and receiving points by the fumble difference, the same way.
+        5. Add DraftKings' yardage bonuses to the ACTUAL points only -- see the
+           note, and `YARDAGE_BONUSES` above.
+        6. Rebuild each total by adding its three parts back together.
 
     Args:
         frame: An `ff_opportunity` weekly table. Needs the eight `*_fantasy_points`
@@ -182,6 +231,15 @@ def rescore(frame, scoring=DfsScoring.FANDUEL):
         Totals are REBUILT from their parts rather than adjusted directly. The
         source guarantees the parts sum to the total exactly, so rebuilding keeps
         that true instead of hoping two separate adjustments stay in step.
+
+        DRAFTKINGS' YARDAGE BONUSES GO ON ACTUAL POINTS ONLY, and this is a known
+        asymmetry rather than an oversight. A bonus is three points for clearing
+        a threshold, so its expected value is three times the CHANCE of clearing
+        it -- a number nothing in this data carries. The consequence is that a
+        heavy-yardage player's actual-minus-expected gap reads a point or two
+        high on DraftKings, which the pages say where they show it. The
+        alternative was to model the chance, which would have put the app's only
+        estimated figure inside the number everything else is measured against.
     """
     frame = frame.copy()
 
@@ -205,6 +263,26 @@ def rescore(frame, scoring=DfsScoring.FANDUEL):
             scoring, receptions=frame[catches].fillna(0))
         frame[passing] = frame[passing] + points_delta(
             scoring, interceptions=frame[picks].fillna(0))
+
+        # Fumbles are charged where they happened. The suffix is dropped for the
+        # expected side because the source has no expected-fumble column -- a
+        # fumble is not an opportunity, so nothing projects one.
+        if suffix == "":
+            for column, part in (("rush_fumble_lost", rushing),
+                                 ("rec_fumble_lost", receiving)):
+                if column in frame.columns:
+                    frame[part] = frame[part] + points_delta(
+                        scoring, fumbles=frame[column].fillna(0))
+
+            if DFS_SCORING_RULES[scoring].pays_yardage_bonuses:
+                for column, threshold, bonus in YARDAGE_BONUSES:
+                    if column not in frame.columns:
+                        continue
+                    part = {"rush_yards_gained": rushing,
+                            "rec_yards_gained": receiving,
+                            "pass_yards_gained": passing}[column]
+                    cleared = frame[column].fillna(0) >= threshold
+                    frame[part] = frame[part] + cleared * bonus
 
         frame[total] = frame[passing] + frame[receiving] + frame[rushing]
 

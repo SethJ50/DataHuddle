@@ -81,8 +81,10 @@ def test_it_works_on_a_whole_column_at_once():
 
 
 def test_an_unknown_scoring_system_raises():
+    # Was written with "DraftKings" as the example of something unsupported,
+    # which stopped being true the moment DraftKings was added.
     with pytest.raises(KeyError):
-        points_delta("DraftKings", receptions=1)
+        points_delta("Yahoo", receptions=1)
 
 
 def test_the_half_point_is_borrowed_from_the_season_long_rules():
@@ -236,3 +238,92 @@ def test_the_shift_is_exactly_the_two_rules_and_nothing_else():
         shift = out[f"total_fantasy_points{suffix}"] - rows[f"total_fantasy_points{suffix}"]
         promised = -0.5 * rows[catches] + 1.0 * rows[picks]
         assert np.allclose(shift, promised)
+
+
+def test_a_scoring_member_prints_as_its_own_name():
+    # From Python 3.11 a str-based enum prints as "DfsScoring.FANDUEL" rather
+    # than "FanDuel". These members go straight into widget labels and page
+    # captions, so the raw member name would be visible on screen.
+    assert str(DfsScoring.FANDUEL) == "FanDuel"
+    assert f"{DfsScoring.PPR}" == "PPR"
+    assert DfsScoring.FANDUEL == "FanDuel"       # still compares as its text
+
+
+# ---------------------------------------------------------------------------
+# DraftKings
+# ---------------------------------------------------------------------------
+
+
+def test_draftkings_pays_full_points_for_a_catch():
+    # Unlike FanDuel, and the same as the source, so catches need no adjustment.
+    assert points_delta(DfsScoring.DRAFTKINGS, receptions=9) == 0.0
+
+
+def test_draftkings_is_gentler_on_both_turnovers():
+    # Interceptions AND fumbles cost one rather than two. FanDuel forgives only
+    # the interception, so the two sites are not interchangeable.
+    assert points_delta(DfsScoring.DRAFTKINGS, interceptions=2) == pytest.approx(2.0)
+    assert points_delta(DfsScoring.DRAFTKINGS, fumbles=1) == pytest.approx(1.0)
+    assert points_delta(DfsScoring.FANDUEL, fumbles=1) == pytest.approx(0.0)
+
+
+def test_a_hundred_yard_game_earns_a_bonus_on_draftkings():
+    frame = opportunity_frame(rec_yards_gained=104.0, rec_fantasy_points=20.0,
+                              total_fantasy_points=20.0, receptions=0.0)
+    scored = rescore(frame, DfsScoring.DRAFTKINGS)
+    assert scored["total_fantasy_points"].iloc[0] == pytest.approx(23.0)
+
+
+def test_the_bonus_is_all_or_nothing_at_the_threshold():
+    just_under = rescore(opportunity_frame(rec_yards_gained=99.0,
+                                           rec_fantasy_points=20.0,
+                                           total_fantasy_points=20.0,
+                                           receptions=0.0),
+                         DfsScoring.DRAFTKINGS)
+    exactly = rescore(opportunity_frame(rec_yards_gained=100.0,
+                                        rec_fantasy_points=20.0,
+                                        total_fantasy_points=20.0,
+                                        receptions=0.0),
+                      DfsScoring.DRAFTKINGS)
+    assert just_under["total_fantasy_points"].iloc[0] == pytest.approx(20.0)
+    assert exactly["total_fantasy_points"].iloc[0] == pytest.approx(23.0)
+
+
+def test_bonuses_stack_when_a_player_clears_two_thresholds():
+    frame = opportunity_frame(rush_yards_gained=110.0, rec_yards_gained=105.0,
+                              rush_fantasy_points=11.0, rec_fantasy_points=10.5,
+                              total_fantasy_points=21.5, receptions=0.0)
+    scored = rescore(frame, DfsScoring.DRAFTKINGS)
+    assert scored["total_fantasy_points"].iloc[0] == pytest.approx(27.5)
+
+
+def test_the_bonus_is_added_to_actual_points_only():
+    # THE KNOWN ASYMMETRY. A bonus is worth three points times the chance of
+    # clearing the threshold, and no column carries that chance. Rather than
+    # model it, the expected side leaves bonuses out -- so this test states the
+    # gap deliberately rather than guarding against it.
+    frame = opportunity_frame(rec_yards_gained=140.0, rec_fantasy_points=20.0,
+                              rec_fantasy_points_exp=18.0,
+                              total_fantasy_points=20.0,
+                              total_fantasy_points_exp=18.0, receptions=0.0,
+                              receptions_exp=0.0)
+    scored = rescore(frame, DfsScoring.DRAFTKINGS)
+
+    assert scored["total_fantasy_points"].iloc[0] == pytest.approx(23.0)
+    assert scored["total_fantasy_points_exp"].iloc[0] == pytest.approx(18.0)
+
+
+def test_fanduel_pays_no_yardage_bonus():
+    frame = opportunity_frame(rec_yards_gained=140.0, rec_fantasy_points=20.0,
+                              total_fantasy_points=20.0, receptions=0.0)
+    assert rescore(frame, DfsScoring.FANDUEL)["total_fantasy_points"].iloc[0] \
+        == pytest.approx(20.0)
+
+
+def test_the_three_sites_are_all_different():
+    # If any two produced the same numbers, one of them would be wrong.
+    frame = opportunity_frame(receptions=8.0, rec_yards_gained=110.0,
+                              rec_fantasy_points=25.0, total_fantasy_points=25.0)
+    totals = {site: rescore(frame, site)["total_fantasy_points"].iloc[0]
+              for site in DfsScoring}
+    assert len(set(totals.values())) == 3

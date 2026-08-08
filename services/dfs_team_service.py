@@ -485,3 +485,130 @@ def _opponents(plays) -> pd.DataFrame:
     return (plays[["game_id", "posteam", "defteam"]]
             .dropna()
             .drop_duplicates())
+
+
+# ---------------------------------------------------------------------------
+# League context: a number nobody can read without one
+# ---------------------------------------------------------------------------
+
+def league_ranks(table, columns, lower_is_better=()) -> pd.DataFrame:
+    """Add each team's placing in the league on the given measures.
+
+    "Expected points added allowed of +0.09" means nothing by itself. "+0.09,
+    31st" means everything, and the difference between the two is a column.
+
+    Steps:
+        1. Copy the table so the caller's is not edited underneath it.
+        2. Rank the teams on each measure, flipping the direction for the ones
+           where a small number is the good news.
+        3. Give tied teams the same placing.
+
+    Args:
+        table: One row per team.
+        columns: Which measures to rank on.
+        lower_is_better: Which of those are better when small -- pace, and
+            anything a defence gives up.
+
+    Returns:
+        pd.DataFrame: The table with a `<measure>_rank` column beside each
+            measure. A team with no value keeps a blank rank rather than being
+            ranked last, since "could not measure" and "worst" are different.
+    """
+    ranked = table.copy()
+    for column in columns:
+        if column not in ranked.columns:
+            continue
+        ranked[f"{column}_rank"] = ranked[column].rank(
+            method="min", ascending=column in lower_is_better,
+            na_option="keep",
+        )
+    return ranked
+
+
+def implied_totals(repo, season, weeks=None) -> pd.DataFrame:
+    """Work out how many points the betting market expected each team to score.
+
+    The spread and the over/under together imply a score for each side, and that
+    implied total is one of the better things available before kickoff for
+    guessing how much fantasy scoring a game will produce.
+
+    Steps:
+        1. Read the schedule and keep the season and weeks asked for.
+        2. Split each game's over/under between the two teams, moving half the
+           spread from the underdog to the favourite.
+        3. Average each team's implied total across its games.
+
+    Args:
+        repo: A `DfsReadRepo`.
+        season: Which season, as a year.
+        weeks: A `(first, last)` pair, both included, or None for the season.
+
+    Returns:
+        pd.DataFrame: `team` and `implied_total`. Empty if the schedule carries
+            no betting lines.
+
+    Note:
+        `spread_line` is written from the HOME team's point of view -- positive
+        means they are favoured, which is confirmed by its correlation with the
+        actual home margin. Getting that backwards would swap every favourite
+        for its underdog and still look entirely plausible.
+
+        This is a SEASON AVERAGE, so it says how much scoring the market
+        generally expects from a team rather than what it expects this week. The
+        weekly figure is the more useful one and belongs with a matchup view.
+    """
+    games = _in_range(repo.schedules(), season, weeks)
+    needed = {"home_team", "away_team", "spread_line", "total_line"}
+    if games.empty or not needed <= set(games.columns):
+        return pd.DataFrame(columns=["team", "implied_total"])
+
+    games = games.dropna(subset=["spread_line", "total_line"])
+    half = games["total_line"] / 2
+    edge = games["spread_line"] / 2
+
+    sides = pd.concat([
+        pd.DataFrame({"team": games["home_team"], "implied_total": half + edge}),
+        pd.DataFrame({"team": games["away_team"], "implied_total": half - edge}),
+    ])
+    return sides.groupby("team", as_index=False).agg(
+        implied_total=("implied_total", "mean"))
+
+
+def weekly_tendencies(repo, season, weeks=None) -> pd.DataFrame:
+    """Track how a team's play-calling moved week by week.
+
+    A season average hides a team that changed. An offence that threw on 45% of
+    neutral plays for six weeks and 65% since is not a 55% offence, and only the
+    week-by-week view says so.
+
+    Steps:
+        1. Read play-by-play and keep the season and weeks asked for.
+        2. Narrow to neutral situations with `neutral_plays` above.
+        3. Work out pass rate and pass rate over expected for each team in each
+           week.
+
+    Args:
+        repo: A `DfsReadRepo`.
+        season: Which season, as a year.
+        weeks: A `(first, last)` pair, both included, or None for the season.
+
+    Returns:
+        pd.DataFrame: `team`, `week`, `neutral_plays`, `pass_rate` and `proe`.
+            A team's bye week is simply absent rather than present as a zero.
+    """
+    plays = _in_range(repo.pbp(), season, weeks)
+    neutral = neutral_plays(plays[plays["posteam"].notna()])
+
+    if neutral.empty:
+        return pd.DataFrame(columns=["team", "week", "neutral_plays",
+                                     "pass_rate", "proe"])
+
+    weekly = neutral.groupby(["posteam", "week"], as_index=False).agg(
+        neutral_plays=("play_id", "size"),
+        pass_rate=("pass", "mean"),
+        expected_pass_rate=("xpass", "mean"),
+    )
+    weekly["proe"] = (weekly["pass_rate"] - weekly["expected_pass_rate"]) * 100
+
+    return weekly.rename(columns={"posteam": "team"})[
+        ["team", "week", "neutral_plays", "pass_rate", "proe"]]

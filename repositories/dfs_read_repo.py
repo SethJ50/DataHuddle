@@ -235,6 +235,55 @@ class DfsReadRepo:
                                                  stat_type="weekly")),
         )
 
+    def player_stats(self):
+        """Get each player's box score for each week.
+
+        The familiar counting stats -- carries, targets, catches, yards,
+        touchdowns -- plus the share statistics that say how much of an offence
+        runs through a player, which is what makes it worth loading alongside
+        the expected-points table rather than instead of it.
+
+        Steps:
+            1. Call nflreadpy's `load_player_stats` for the configured seasons.
+            2. Convert it with `_to_pandas` above.
+
+        Returns:
+            pd.DataFrame: About 19,000 rows per season, one per player per week,
+                keyed by `player_id` -- the same id this app calls
+                `canonical_id`. Carries `target_share`, `air_yards_share`,
+                `wopr`, `racr`, `pacr` and the per-phase EPA columns as well as
+                the box score.
+        """
+        return self._cached(
+            "player_stats",
+            lambda: self._to_pandas(self._loader.load_player_stats(self.seasons)),
+        )
+
+    def team_stats(self):
+        """Get each team's own weekly totals, offence and defence alike.
+
+        The only place the defensive counting stats live -- sacks, takeaways,
+        defensive touchdowns -- which is what a team defence is scored on.
+
+        Steps:
+            1. Call nflreadpy's `load_team_stats` for the configured seasons.
+            2. Convert it with `_to_pandas` above.
+
+        Returns:
+            pd.DataFrame: About 570 rows per season, one per team per week,
+                including `def_sacks`, `def_interceptions`, `def_fumbles_forced`,
+                `fumble_recovery_opp`, `def_tds` and `def_safeties`.
+
+        Note:
+            POINTS ALLOWED IS NOT IN HERE. It is the opponent's score, which
+            lives in the schedule -- see `services/dfs_dst_service.py`, which
+            joins the two.
+        """
+        return self._cached(
+            "team_stats",
+            lambda: self._to_pandas(self._loader.load_team_stats(self.seasons)),
+        )
+
     def snap_counts(self):
         """Get how many snaps each player was on the field for, per game.
 
