@@ -17,8 +17,9 @@ import streamlit as st
 from streamlit_state import get_app_context
 from scoring import ScoringFormat
 
-from ui_helpers import draft_selector
+from ui_helpers import draft_selector, FORMAT_LABELS, adp_to_round_pick, load_sim_board
 from registry import MARKING_CATEGORIES
+from presentation.marks import mark_column_config
 
 ctx = get_app_context()
 
@@ -26,14 +27,12 @@ with st.sidebar:
     st.header("Draft")
     draft = draft_selector(ctx, "team_profile")
 
-# teams(): 1 row per team — team_abbr, team_name, team_logo_espn, team_conf, etc.
-# Note: this table has 36 rows because it includes relocated/defunct franchises
-# (LA/STL Rams, OAK Raiders, SD Chargers) that have no current projections.
+# 1 row per team -- team_abbr, team_name, team_logo_espn, team_conf, etc. All 36
+# rows, including relocated franchises (LA/STL Rams, OAK, SD) with no projections.
 teams = ctx.nfl_read_repo.teams()
 
-# Keep only the 32 active teams so the dropdown never offers a franchise whose
-# roster would come back empty. These abbreviations match FFB's team codes
-# exactly (verified), so team_abbr can be used directly as the projections filter.
+# The 32 active teams, so the dropdown never offers a franchise whose roster comes
+# back empty. These match FFB's team codes, so team_abbr filters projections directly.
 ACTIVE_TEAM_ABBRS = {
     "ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", "CLE", "DAL", "DEN", "DET", "GB",
     "HOU", "IND", "JAX", "KC", "LAC", "LAR", "LV", "MIA", "MIN", "NE", "NO", "NYG",
@@ -68,9 +67,8 @@ with left:
     if draft is None:
         st.info("Select a draft in the sidebar to add team notes.")
     else:
-        # Seed the text area from the saved note. The key includes draft + team
-        # so switching either loads the correct note instead of reusing the
-        # previous widget's text (value= only applies when the key is new).
+        # The key includes draft + team so switching either loads that note rather
+        # than reusing the last widget's text -- `value=` only applies to a new key.
         saved_note = ctx.team_notes_service.get(draft["draft_id"], team_abbr)
         note_text = st.text_area(
             "Team Notes",
@@ -84,39 +82,22 @@ with left:
             st.toast("Team notes saved")
 
 
-# Pretty labels for the 3 formats the projections service produces.
-FORMAT_LABELS = {
-    ScoringFormat.REGULAR.value:  "Standard",
-    ScoringFormat.HALF_PPR.value: "Half PPR",
-    ScoringFormat.FULL_PPR.value: "Full PPR",
-}
-
-# Short header + full-name tooltip for each marking category. Checkbox column
-# width is driven mostly by header text, so the abbreviations keep all six
-# categories fitting horizontally; the full name shows on hover via `help`.
-CATEGORY_HEADERS = {
-    "Safe":                ("Safe", "Safe"),
-    "Upside":              ("Ups",  "Upside"),
-    "Love":                ("Love",    "Love"),
-    "Like":                ("Like", "Like"),
-    "Uncertain Backfield": ("BF?",  "Uncertain Backfield"),
-    "New Top 12 Receiver": ("T12",  "New Top 12 Receiver"),
-}
-
 with right:
     depth_chart_tab, tab2 = st.tabs(["Depth Chart", "Other"])
 
     with depth_chart_tab:
         st.subheader("Projected Depth Chart")
-        
-        with st.container():
-            col1, col2 = st.columns([3, 9])
-            with col1:
-                label_to_format = {label: fmt for fmt, label in FORMAT_LABELS.items()}
-                chosen_label = st.selectbox("Scoring format", list(label_to_format.keys()), index=1)  # default Half PPR
-                fmt_value = label_to_format[chosen_label]          # e.g. "half_ppr"
 
-                points_col = f"fantasy_points_{fmt_value}_season"
+        # From the draft, not a dropdown -- a chart ranked in a format your league
+        # doesn't use is a trap. Stored as the .value string ("half_ppr"), which is
+        # what the column name needs. Half PPR without a draft, as the dropdown did.
+        fmt_value = draft["scoring_format"] if draft else ScoringFormat.HALF_PPR.value
+        points_col = f"fantasy_points_{fmt_value}_season"
+
+        st.caption(
+            f"Projected points in {FORMAT_LABELS.get(fmt_value, fmt_value)}"
+            + ("" if draft else " (default — no draft selected)")
+        )
 
         with st.container():
             depth_1_col, depth_2_col = st.columns([10, 2])
@@ -145,6 +126,42 @@ with right:
                     return proj
 
                 proj = load_projection_board()
+
+                @st.cache_data(show_spinner="Loading platform ADP...")
+                def load_platform_adp(platform, fmt_value):
+                    """Look up where one platform drafts every player, as a lookup table.
+
+                    Building the comparison touches all three platforms and the
+                    identity mapping, so it is far too slow to redo whenever a
+                    checkbox is ticked. The `@st.cache_data` decorator above keeps
+                    the result per platform and scoring format.
+
+                    Steps:
+                        1. Ask the ADP comparison service for its table, rebuilding
+                           the ScoringFormat enum from the stored string.
+                        2. Pick out the one column belonging to this platform.
+                        3. Return an empty lookup for a platform name that has no
+                           column, so an unrecognised value leaves the ADP blank
+                           rather than taking the page down.
+
+                    Args:
+                        platform: Where the league drafts: "espn", "yahoo", or
+                            "sleeper". Also part of the cache key.
+                        fmt_value: The scoring format as its stored string, such as
+                            "half_ppr". Also part of the cache key.
+
+                    Returns:
+                        dict: Maps a canonical player id to his ADP on that
+                            platform, as an overall pick number. A player that
+                            platform does not rank is simply absent.
+                    """
+                    # 1 row per in-scope player -- canonical_id, display_name,
+                    # headshot_url, position, espn_adp, yahoo_adp, sleeper_adp.
+                    comparison = ctx.adp_comparison_service.compare(ScoringFormat(fmt_value))
+                    column = f"{platform}_adp"
+                    if column not in comparison.columns:
+                        return {}
+                    return dict(zip(comparison["canonical_id"], comparison[column]))
 
                 def top_by_position(df, position, n, points_col):
                     """Pick the best few projected players at one position.
@@ -176,18 +193,35 @@ with right:
                         .head(n)
                     )
 
-                # Filter the full projection board down to just the selected team.
-                team_proj = proj[proj["team"] == team_abbr]        # this team's projected players only
+                team_proj = proj[proj["team"] == team_abbr]   # this team's players only
 
-                # Markings live per (draft_id, canonical_id). Without a selected draft
-                # we can't load or save them, so the tables render read-only.
+                # All draft-scoped: markings key off (draft_id, canonical_id), and only
+                # the draft knows which platform's ADP to show or which simulation to
+                # read. Without one there is nothing to load, so the tables read-only.
                 if draft is not None:
                     marks = ctx.player_markings_service.all_for_draft(draft["draft_id"])
                     cats_by_id  = {m["canonical_id"]: set(m.get("categories", [])) for m in marks}
                     notes_by_id = {m["canonical_id"]: m.get("notes", "")          for m in marks}
+
+                    plat_adp_by_id = load_platform_adp(draft["platform"], fmt_value)
+
+                    # One cache entry shared with Draft Plan and Sim Viewer. A missing
+                    # simulation is normal here, not an error -- the column goes blank.
+                    sim_board, sim_error = load_sim_board(ctx, draft, year=2026)
+                    if sim_error:
+                        sim_adp_by_id = {}
+                    else:
+                        sim_adp_by_id = {
+                            canonical_id: mean_pick
+                            for canonical_id, mean_pick in zip(sim_board.table["canonical_id"],
+                                                               sim_board.simulated_adp)
+                            # Team defenses have no canonical id -- a key nothing matches.
+                            if isinstance(canonical_id, str)
+                        }
                 else:
                     st.info("Select a draft in the sidebar to mark players and add notes.")
                     cats_by_id, notes_by_id = {}, {}
+                    plat_adp_by_id, sim_adp_by_id = {}, {}
 
                 edited_tables = {}  # position -> edited DataFrame, collected for one Save
 
@@ -216,9 +250,19 @@ with right:
                     table = slot[["canonical_id", "name", points_col]].rename(
                         columns={"name": "Player", points_col: "Proj Pts"}
                     )
-                    # Seed each category checkbox from saved markings. The c=cat default
-                    # arg captures the current category so every column doesn't bind to
-                    # the last loop value.
+
+                    # Where the market and the model each have him going, as ROUND.PICK
+                    # (the float 1.04 means round 1 pick 4). Blank, not zero, for anyone
+                    # a source doesn't rank -- "unranked" and "first overall" differ.
+                    table["PlatAdp"] = table["canonical_id"].map(plat_adp_by_id).map(
+                        lambda a: adp_to_round_pick(a, draft["num_teams"])
+                    )
+                    table["SimAdp"] = table["canonical_id"].map(sim_adp_by_id).map(
+                        lambda a: adp_to_round_pick(a, draft["num_teams"])
+                    )
+
+                    # Seed each checkbox from the saved markings. `c=cat` captures the
+                    # current category; without it every column binds to the last one.
                     for cat in MARKING_CATEGORIES:
                         table[cat] = table["canonical_id"].map(
                             lambda cid, c=cat: c in cats_by_id.get(cid, set())
@@ -226,27 +270,43 @@ with right:
                     # Seed notes from saved markings.
                     table["Notes"] = table["canonical_id"].map(lambda cid: notes_by_id.get(cid, ""))
 
-                    # Condensed column config: short checkbox headers (full name in the
-                    # tooltip) + small widths so all 6 categories fit horizontally; pin
-                    # Player so it stays visible while scrolling right.
+                    # Player is pinned so it stays visible while scrolling right. Widths
+                    # are pixel ints -- "small"/"medium"/"large" also work, nothing else.
                     col_cfg = {
                         "canonical_id": None,   # hidden -- used only for saving
                         "Player":   st.column_config.TextColumn("Player", width="medium", pinned=True),
-                        "Proj Pts": st.column_config.NumberColumn("ProjPts", width="80px", format="%.0f"),
+                        "Proj Pts": st.column_config.NumberColumn("ProjPts", width=60, format="%.0f"),
+                        # "%.2f" turns the encoded float 1.04 into the text "1.04".
+                        "PlatAdp":  st.column_config.NumberColumn(
+                            "PlatAdp", width=80, format="%.2f",
+                            help=f"Where {draft['platform'].upper()} has him going in "
+                                 f"{FORMAT_LABELS.get(fmt_value, fmt_value)}, as "
+                                 f"ROUND.PICK. Blank if that platform doesn't rank him.",
+                        ),
+                        "SimAdp":   st.column_config.NumberColumn(
+                            "SimAdp", width=80, format="%.2f",
+                            help="The average pick he went at across the simulated "
+                                 "drafts, as ROUND.PICK. Blank for a kept player, for "
+                                 "anyone outside the simulated pool, and when no "
+                                 "simulation has been run for this draft's settings.",
+                        ),
                         "Notes":    st.column_config.TextColumn("Notes", width="medium"),
                     }
-                    for cat in MARKING_CATEGORIES:
-                        short, full = CATEGORY_HEADERS[cat]
-                        col_cfg[cat] = st.column_config.CheckboxColumn(short, help=full, width="40px")
+                    # Headers, tooltips and widths from presentation/marks.py, so this
+                    # editor can't disagree with the draft plan board. No position arg:
+                    # every category shows everywhere, which the save loop below assumes.
+                    for column, settings in mark_column_config(editable=True).items():
+                        col_cfg[column] = st.column_config.CheckboxColumn(**settings)
 
-                    # key includes team + position so switching teams resets the editor
-                    # state instead of carrying edits onto a different roster.
+                    # Keyed by team + position, so switching teams resets the editor
+                    # instead of carrying edits onto a different roster.
                     edited_tables[position] = st.data_editor(
                         table,
                         hide_index=True,
                         width="stretch",
                         key=f"editor_{draft['draft_id']}_{team_abbr}_{position}",
-                        disabled=["Player", "Proj Pts"],   # only checkboxes + notes editable
+                        # Checkboxes + Notes only; anything computed is read-only.
+                        disabled=["Player", "Proj Pts", "PlatAdp", "SimAdp"],
                         column_config=col_cfg,
                     )
 

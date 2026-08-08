@@ -31,8 +31,6 @@ POSITIONS = ["QB", "RB", "WR", "TE"]
 # Header overrides for board columns; anything not listed uses its own name.
 BOARD_COLUMN_LABELS = {}
 
-# Fixed pixel width for the mark (checkbox) columns.
-MARK_COLUMN_WIDTH = 45
 
 def board_header(name):
     """Get the heading to display for one board column.
@@ -315,7 +313,6 @@ with st.container(border=True):
                             ),
                         },
                     )
-
             with board_col:
                 # Compute and output probability that you get one of these selected players
                 if sim_board is not None and ordered:
