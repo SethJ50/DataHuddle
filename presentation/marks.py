@@ -1,24 +1,147 @@
-"""Display metadata for player markings (labels, colors, position scope).
+"""Display metadata for player markings: headers, colours, widths, and scope.
 
-Kept separate from registry.py (which owns the domain list MARKING_CATEGORIES)
-so that any page showing marks -- draft plan, player profile, team profile --
-renders them with the SAME short labels and colors from one source of truth.
+registry.py owns the DOMAIN question -- which marks exist, and what they are
+called when one is saved to the database. This file owns the LOOK, in one place,
+so the draft plan board, the draft runner console and the team profile editor
+cannot drift into showing the same six marks three different ways. They did
+exactly that before this module became the single source.
+
+TO CHANGE HOW A MARK APPEARS ANYWHERE IN THE APP, edit MARK_STYLE below and
+nothing else.
+
+Deliberately free of Streamlit, like every other module in presentation/. The
+column-config helper hands back plain dictionaries of keyword arguments, and the
+page turns those into widgets. That keeps this testable without a browser.
 """
 
-# Per-mark display config, keyed by the registry category name.
-#   label    -> short column header shown on the board
-#   color    -> background color for the cell when the mark is checked
-#   position -> (optional) restricts the mark to one position's tab;
-#               absent means the mark shows on every tab
-CATEGORY_STYLE = {
-    "Safe":                {"label": "Safe",   "color": "#3b82f6"},                    # blue
-    "Upside":              {"label": "Upside", "color": "#eab308"},                    # yellow
-    "Love":                {"label": "Love",   "color": "#22c55e"},                    # green
-    "Like":                {"label": "Like",   "color": "#86efac"},                    # lighter green
-    "Uncertain Backfield": {"label": "UBF",    "color": "#a855f7", "position": "RB"},  # purple
-    "New Top 12 Receiver": {"label": "T12",    "color": "#a855f7", "position": "WR"},  # purple
+from registry import MARKING_CATEGORIES
+
+# Fallback width in pixels for a mark column that does not name its own. An
+# emoji header needs a little more room than a bare checkbox, because Streamlit
+# also draws a sort caret in the header.
+DEFAULT_MARK_WIDTH = 40
+
+# Per-mark display config, keyed by the registry category name -- which is also
+# the DataFrame column name every page uses, so a saved value round-trips
+# without translation.
+#
+#   header   -> what the column heading SHOWS. An emoji, or a short string for
+#               anything an emoji would not say clearly.
+#   color    -> background tint for the cell when the mark is checked.
+#   width    -> column width in pixels. Optional; DEFAULT_MARK_WIDTH otherwise.
+#   help     -> the hover tooltip. Optional, and defaults to the category name.
+#               THIS IS WHAT MAKES AN EMOJI HEADER READABLE -- an unlabelled
+#               icon is a guess until you hover it, so do not leave it off a
+#               mark whose emoji is not obvious.
+#   position -> restricts the mark to one position's tab. Absent means it shows
+#               everywhere.
+MARK_STYLE = {
+    "Safe": {
+        "header": "👍",
+        "color": "#3b82f6",                                  # blue
+        "help": "Safe — a floor you can rely on.",
+    },
+    "Upside": {
+        "header": "📈",
+        "color": "#eab308",                                  # yellow
+        "help": "Upside — a ceiling worth reaching for.",
+    },
+    "Love": {
+        "header": "❤️",
+        "color": "#22c55e",                                  # green
+        "help": "Love — you want him on your team.",
+    },
+    "Like": {
+        "header": "✅",
+        "color": "#86efac",                                  # lighter green
+        "help": "Like — happy to take him at the right price.",
+    },
+    "Uncertain Backfield": {
+        "header": "BF?",
+        "color": "#a855f7",                                  # purple
+        "help": "Uncertain Backfield — the touches are not settled.",
+        "position": "RB"
+    },
+    "New Top 12 Receiver": {
+        "header": "T12",
+        "color": "#a855f7",                                  # purple
+        "help": "New Top 12 Receiver — a breakout into the top tier.",
+        "position": "WR"
+    },
 }
 
-# Derived label -> color map. Board columns are named by their label, so the
-# conditional-formatting helper looks colors up by label rather than full name.
-MARK_COLOR_BY_LABEL = {spec["label"]: spec["color"] for spec in CATEGORY_STYLE.values()}
+# Derived colour map, keyed by COLUMN NAME (which is the category name). Handed
+# straight to `highlight_true` in presentation/st_tables.py, which paints a cell
+# when its checkbox is ticked.
+MARK_COLORS = {
+    category: spec["color"] for category, spec in MARK_STYLE.items()
+}
+
+
+def visible_marks(position=None):
+    """List which marks belong on one position's table, in registry order.
+
+    A couple of marks only make sense for one position — an uncertain backfield
+    is not a thing a quarterback has — so a table asks which ones apply to it
+    rather than showing all six everywhere.
+
+    Steps:
+        1. Walk MARKING_CATEGORIES from registry.py, so the order on screen is
+           the order the domain list declares and never depends on this file.
+        2. Keep a mark whose spec has no `position` at all, since that means it
+           shows everywhere.
+        3. Keep a position-scoped mark only when it matches the position asked
+           for.
+
+    Args:
+        position: The position whose table this is, such as "RB". Pass None to
+            get every mark, which is what a table not split by position — the
+            draft runner console — wants.
+
+    Returns:
+        list: The category names to show, in registry order. These are also the
+            DataFrame column names to build, so a caller can use the result for
+            both without translating.
+    """
+    visible = []
+    for category in MARKING_CATEGORIES:
+        scope = MARK_STYLE.get(category, {}).get("position")
+        if scope is None or position is None or scope == position:
+            visible.append(category)
+    return visible
+
+
+def mark_column_config(position=None):
+    """Build the display settings for each mark column, ready for Streamlit.
+
+    Returns plain dictionaries rather than widgets, so this module never has to
+    import Streamlit. The page turns each one into a checkbox column with a
+    single `**` unpack, which is what keeps every page's marks identical without
+    any of them holding a copy of the settings.
+
+    Steps:
+        1. Ask `visible_marks` above which marks apply to this position.
+        2. For each, read its heading, tooltip and width out of MARK_STYLE,
+           falling back to the category name and DEFAULT_MARK_WIDTH so a newly
+           added mark renders sensibly before anyone has styled it.
+
+    Args:
+        position: The position whose table this is, or None for all marks.
+
+    Returns:
+        dict: Maps each column name to the keyword arguments for
+            `st.column_config.CheckboxColumn` — `label`, `help`, and `width`.
+            Use it as:
+
+                for column, settings in mark_column_config("RB").items():
+                    column_config[column] = st.column_config.CheckboxColumn(**settings)
+    """
+    settings = {}
+    for category in visible_marks(position):
+        spec = MARK_STYLE.get(category, {})
+        settings[category] = {
+            "label": spec.get("header", category),
+            "help": spec.get("help", category),
+            "width": spec.get("width", DEFAULT_MARK_WIDTH),
+        }
+    return settings

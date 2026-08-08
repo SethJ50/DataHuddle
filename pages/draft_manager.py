@@ -13,6 +13,7 @@ Streamlit runs it top to bottom each time the page is shown, or any widget on
 it is changed.
 """
 
+import pandas as pd
 import streamlit as st
 
 from streamlit_state import get_app_context
@@ -266,6 +267,58 @@ def keeper_problems(keepers, num_teams, has_keepers):
     return problems
 
 
+
+def render_transfer(report):
+    """Show what a notes copy did, or would do.
+
+    Steps:
+        1. Summarise each of players and teams as a line of counts.
+        2. List the rows that actually change, so a merge can be checked before
+           it happens. Unchanged rows are counted but not listed -- on a second
+           run they are nearly all of them.
+
+    Args:
+        report: A `TransferReport` from `NotesTransferService`.
+
+    Returns:
+        None. The work is what is drawn.
+    """
+    from services.notes_transfer_service import ADDED, MERGED, UNCHANGED
+
+    if not report.changes:
+        st.info("That draft has no markings or notes to copy.",
+                icon=":material/inbox:")
+        return
+
+    for kind, label in (("player", "Player markings"), ("team", "Team notes")):
+        counted = report.counts(kind)
+        if not any(counted.values()):
+            continue
+        st.markdown(
+            f"**{label}** — {counted[ADDED]} added, {counted[MERGED]} merged, "
+            f"{counted[UNCHANGED]} already up to date"
+        )
+
+    changing = [c for c in report.changes if c.action != UNCHANGED]
+    if changing:
+        st.dataframe(
+            pd.DataFrame([{"": c.label, "Change": c.detail,
+                           "Kind": "player" if c.kind == "player" else "team"}
+                          for c in changing]),
+            hide_index=True, width="stretch",
+            height=min(56 + 35 * len(changing), 320),
+        )
+
+    if report.applied:
+        st.success(f"Copied. {report.touched} entries updated.",
+                   icon=":material/check_circle:")
+    elif changing:
+        st.caption("Nothing has been written yet — press **Copy them across** "
+                   "to apply this.")
+    else:
+        st.caption("Nothing to do: this draft already has all of it.")
+
+
 st.title("Draft Manager")
 st.caption("Create a new draft, or edit the settings of an existing one.")
 
@@ -358,6 +411,53 @@ with edit_tab:
             # which doesn't change.
             st.toast("Draft settings saved.", icon=":material/check_circle:")
             st.rerun()
+
+        # ------------------------------------------------------------------
+        # Copy your own notes and tags in from another league
+        # ------------------------------------------------------------------
+        others = {other: by_id[other]["name"] for other in by_id if other != did}
+
+        with st.expander("Copy notes and markings from another draft"):
+            if not others:
+                st.caption("You need a second saved draft to copy from.")
+            else:
+                st.caption(
+                    f"Copies every player marking and team note into "
+                    f"**{d['name']}**. Nothing is overwritten — where both "
+                    "drafts have something for the same player the tags are "
+                    "combined and both notes are kept, labelled with where each "
+                    "came from."
+                )
+
+                source_id = st.selectbox(
+                    "Copy from", list(others),
+                    format_func=lambda draft_id: others[draft_id],
+                    key=f"dm_copy_from_{did}",
+                )
+
+                # Names make the preview readable; ids do not.
+                names = ctx.roster_service.player_names()
+                transfer = ctx.notes_transfer_service
+
+                preview_col, apply_col = st.columns([1, 1])
+                with preview_col:
+                    previewed = st.button(
+                        "Preview the copy", icon=":material/visibility:",
+                        key=f"dm_copy_preview_{did}", width="stretch",
+                    )
+                with apply_col:
+                    committed = st.button(
+                        "Copy them across", type="primary",
+                        icon=":material/content_copy:",
+                        key=f"dm_copy_apply_{did}", width="stretch",
+                    )
+
+                if previewed or committed:
+                    report = (transfer.copy if committed else transfer.preview)(
+                        source_id, did, source_label=others[source_id],
+                        names=names,
+                    )
+                    render_transfer(report)
 
         # Danger zone: deleting is two-step so it can't be a fat-finger.
         with st.expander("Delete this draft"):

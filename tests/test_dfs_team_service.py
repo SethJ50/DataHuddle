@@ -488,3 +488,114 @@ def test_an_empty_season_returns_the_columns_anyway():
     table = defensive_allowances(repo, 1999, play_kind="rush")
     assert table.empty
     assert "points_per_play" in table.columns
+
+
+# ---------------------------------------------------------------------------
+# League context
+# ---------------------------------------------------------------------------
+
+def test_ranks_put_the_biggest_first_by_default():
+    from services.dfs_team_service import league_ranks
+    table = pd.DataFrame({"team": ["A", "B", "C"], "proe": [1.0, 9.0, 5.0]})
+    ranked = league_ranks(table, ["proe"]).set_index("team")
+    assert ranked.loc["B", "proe_rank"] == 1
+    assert ranked.loc["A", "proe_rank"] == 3
+
+
+def test_some_measures_rank_the_other_way_round():
+    # Fewer seconds between snaps is a FASTER offence, and anything a defence
+    # gives up is better when small. Getting this backwards would rank the
+    # league's best defence last and still look entirely plausible.
+    from services.dfs_team_service import league_ranks
+    table = pd.DataFrame({"team": ["FAST", "SLOW"],
+                          "seconds_per_play": [25.0, 32.0]})
+    ranked = league_ranks(table, ["seconds_per_play"],
+                          lower_is_better=("seconds_per_play",)).set_index("team")
+    assert ranked.loc["FAST", "seconds_per_play_rank"] == 1
+
+
+def test_a_team_with_no_value_is_not_ranked_last():
+    # "Could not measure" and "worst in the league" are different claims.
+    from services.dfs_team_service import league_ranks
+    table = pd.DataFrame({"team": ["A", "B"], "proe": [3.0, np.nan]})
+    ranked = league_ranks(table, ["proe"]).set_index("team")
+    assert np.isnan(ranked.loc["B", "proe_rank"])
+
+
+def test_tied_teams_share_a_placing():
+    from services.dfs_team_service import league_ranks
+    table = pd.DataFrame({"team": ["A", "B", "C"], "proe": [5.0, 5.0, 1.0]})
+    ranked = league_ranks(table, ["proe"]).set_index("team")
+    assert ranked.loc["A", "proe_rank"] == ranked.loc["B", "proe_rank"] == 1
+    assert ranked.loc["C", "proe_rank"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Implied totals
+# ---------------------------------------------------------------------------
+
+class ScheduleRepo:
+    """Serves a schedule, as `DfsReadRepo` would."""
+
+    def __init__(self, frame):
+        self._frame = frame
+
+    def schedules(self):
+        return self._frame
+
+
+def test_the_favourite_gets_the_bigger_half_of_the_total():
+    # `spread_line` is written from the HOME team's point of view, and positive
+    # means they are favoured -- confirmed against real margins. Backwards, this
+    # would swap every favourite for its underdog and still look plausible.
+    from services.dfs_team_service import implied_totals
+    repo = ScheduleRepo(pd.DataFrame({
+        "season": [2024], "week": [1], "home_team": ["KC"],
+        "away_team": ["BAL"], "spread_line": [3.0], "total_line": [46.0],
+    }))
+    totals = implied_totals(repo, 2024).set_index("team")
+    assert totals.loc["KC", "implied_total"] == pytest.approx(24.5)   # 23 + 1.5
+    assert totals.loc["BAL", "implied_total"] == pytest.approx(21.5)  # 23 - 1.5
+
+
+def test_the_two_implied_totals_add_up_to_the_over_under():
+    from services.dfs_team_service import implied_totals
+    repo = ScheduleRepo(pd.DataFrame({
+        "season": [2024], "week": [1], "home_team": ["A"], "away_team": ["B"],
+        "spread_line": [-6.5], "total_line": [51.0],
+    }))
+    assert implied_totals(repo, 2024)["implied_total"].sum() == pytest.approx(51.0)
+
+
+def test_a_schedule_without_betting_lines_gives_an_empty_table():
+    from services.dfs_team_service import implied_totals
+    repo = ScheduleRepo(pd.DataFrame({"season": [2024], "week": [1],
+                                      "home_team": ["A"], "away_team": ["B"]}))
+    table = implied_totals(repo, 2024)
+    assert table.empty
+    assert "implied_total" in table.columns
+
+
+# ---------------------------------------------------------------------------
+# Week-by-week tendencies
+# ---------------------------------------------------------------------------
+
+def test_weekly_tendencies_are_reported_per_week_not_pooled():
+    # A season average hides a team that changed. An offence that threw on 100%
+    # of neutral plays in week 1 and 0% in week 2 is not a 50% offence.
+    from services.dfs_team_service import weekly_tendencies
+    frame = repo_of([
+        {"week": 1, "play_type": "pass", "pass": 1.0},
+        {"week": 2, "play_type": "run", "pass": 0.0},
+    ])
+    weekly = weekly_tendencies(frame, 2024).set_index("week")
+    assert weekly.loc[1, "pass_rate"] == 1.0
+    assert weekly.loc[2, "pass_rate"] == 0.0
+
+
+def test_a_bye_week_is_absent_rather_than_zero():
+    # A zero would draw as a team that ran every play, which is not what
+    # happened -- they did not play.
+    from services.dfs_team_service import weekly_tendencies
+    frame = repo_of([{"week": 1}, {"week": 3}])
+    assert sorted(weekly_tendencies(frame, 2024)["week"]) == [1, 3]

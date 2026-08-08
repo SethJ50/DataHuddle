@@ -14,6 +14,7 @@ cannot drift apart.
 
 from dataclasses import dataclass
 from pathlib import Path
+from functools import cached_property
 
 import numpy as np
 import pandas as pd
@@ -26,6 +27,7 @@ from draft_model.queries import (
     replacement_value,
 )
 from draft_model.table import blend_adp, build_table
+from draft_model.calibrate import simulated_mean_pick
 
 # Weighted toward the platform the league actually drafts on -- the default list
 # a platform shows in-app anchors real leaguemates far more than consensus does.
@@ -108,6 +110,46 @@ class DraftBoard:
         """
         return self.artifact.n_sims
 
+    @cached_property
+    def simulated_adp(self):
+        """Work out the average pick each player actually went at in the simulation.
+
+        The simulation's OWN version of ADP, as opposed to the vendor ADP it was
+        told to reproduce. Calibration's entire job is to make those two agree, so
+        showing them side by side says how well it managed — and where the model
+        genuinely disagrees with the market.
+
+        `cached_property` means this is computed the FIRST time it is read and
+        remembered on the board afterwards. That matters here: the picks matrix
+        runs to a few million numbers, and the page reading this re-runs on every
+        keystroke.
+
+        Steps:
+            1. Call `simulated_mean_pick` from draft_model/calibrate.py, which
+               averages each player's column across the simulations while
+               ignoring the drafts he went untaken in.
+            2. Blank out the kept players with `kept_mask` above. A keeper's
+               column holds the pick his team spends on him, which is a roster
+               fact rather than a draft position — averaging it would print a
+               confident-looking number that means nothing.
+
+        Returns:
+            np.ndarray: One average pick number per player, in table row order
+                (so entry i describes `table.iloc[i]`, the same alignment
+                everything else on this board keeps). NaN for a kept player, and
+                for anyone drafted in no simulation at all.
+
+        Note:
+            Deliberately the SAME function calibration uses, rather than a
+            re-derivation. Both are "mean pick, conditional on being drafted",
+            which is also how vendors define ADP — if this column used a
+            different definition it would show a gap that is really just two
+            ways of counting.
+        """
+        mean_pick = simulated_mean_pick(self.artifact.picks)
+        mean_pick[self.kept_mask()] = np.nan
+        return mean_pick
+
     def availability(self, target_picks=None) -> pd.DataFrame:
         """Build the main table: who survives to each of your picks, and at what cost.
 
@@ -173,7 +215,9 @@ class DraftBoard:
         frame = self.table[["canonical_id", "name", "position", "team", "adp_target"]].copy()
         frame["projection"] = self.table.get("projection", np.nan)
         frame["vorp"] = self.vorp
+        frame["simulated_adp"] = self.simulated_adp
         frame["kept"] = kept
+
 
         # "Your next pick" is the first one you own that is still ahead of the
         # player's typical draft slot; falling back to the second pick keeps this

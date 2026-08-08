@@ -1,7 +1,10 @@
 """
 Clear and reload every MongoDB collection from the CSV files in data/,
-including subfolders (e.g. data/ffb/). data/raw/ is skipped — it holds
-scratch inputs (saved HTML pages), not data to load.
+including subfolders (e.g. data/ffb/). Two folders are skipped: data/raw/ holds
+scratch inputs (saved HTML pages), and data/dfs/ holds the Daily Fantasy salary
+exports, which need real processing rather than a raw dump — names have to be
+resolved to player ids and the slate tagged with its week. Those have their own
+loader, scripts/load_salaries.py.
 
 Each CSV's filename stem (without extension) is used as its collection name,
 e.g. data/ffb/ffb_qb_projections.csv -> the 'ffb_qb_projections' collection.
@@ -33,7 +36,7 @@ from repositories.adp_snapshot_repo import AdpSnapshotRepo
 from scoring import ScoringFormat
 
 DATA_DIR = PROJECT_ROOT / "data"
-SKIP_DIRS = {"raw"}
+SKIP_DIRS = {"raw", "dfs"}
 
 # All three formats are loaded because scoring format is a per-draft setting, and
 # FFC returns a genuinely different player pool for each (246/204/186 in 2026).

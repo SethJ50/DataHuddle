@@ -48,6 +48,12 @@ class FakeLoader:
     def load_ff_opportunity(self, seasons, stat_type=None):
         return self._serve("ff_opportunity", seasons, stat_type=stat_type)
 
+    def load_player_stats(self, seasons):
+        return self._serve("player_stats", seasons)
+
+    def load_team_stats(self, seasons):
+        return self._serve("team_stats", seasons)
+
     def load_snap_counts(self, seasons):
         return self._serve("snap_counts", seasons)
 
@@ -118,6 +124,14 @@ def repo():
                 "season": ["2024", "2024"], "week": [1.0, 2.0],
                 "player_id": ["00-0001", "00-0001"],
                 "total_fantasy_points": [17.2, 9.4],
+            }),
+            player_stats=pl.DataFrame({
+                "season": [2024], "week": [1], "player_id": ["00-0001"],
+                "targets": [9], "target_share": [0.24],
+            }),
+            team_stats=pl.DataFrame({
+                "season": [2024], "week": [1], "team": ["SEA"],
+                "def_sacks": [3], "def_interceptions": [1],
             }),
             snap_counts=pl.DataFrame({
                 "season": [2024, 2024], "week": [1, 2],

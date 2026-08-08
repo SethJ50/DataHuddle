@@ -43,6 +43,11 @@ class Collections:
     FFC_ADP = "ffc_adp"
     ADP_SNAPSHOTS = "adp_snapshots"
 
+    DFS_SALARIES = "dfs_salaries"
+    """Weekly Daily Fantasy salaries, every slate ever loaded, keyed by season,
+    week, site and the site's own player id. See repositories/dfs_salary_repo.py
+    for why the history is kept rather than overwritten."""
+
     PLAYER_ID_MAP = "player_id_map"
     PLAYER_NOTES = "player_notes"
     PLAYER_CATEGORIES = "player_categories"

@@ -11,6 +11,7 @@ browser session.
 from registry import Collections
 from repositories.collection_repo import CollectionRepo
 from repositories.dfs_read_repo import DfsReadRepo
+from repositories.dfs_salary_repo import DfsSalaryRepo
 from repositories.nfl_read_repo import NflReadRepo
 from repositories.player_directory import PlayerDirectory
 from repositories.player_identity_repo import PlayerIdentityRepo
@@ -22,6 +23,7 @@ from adapters.adp_source_adapter import EspnAdpAdapter, SleeperAdpAdapter, Yahoo
 from services.adp_comparison_service import AdpComparisonService
 from services.draft_plan_service import DraftPlanService
 from services.draft_service import DraftService
+from services.notes_transfer_service import NotesTransferService
 from services.player_markings_service import PlayerMarkingsService
 from services.team_notes_service import TeamNotesService
 from repositories.ffc_repo import FfcRepo
@@ -66,13 +68,15 @@ class AppContext:
             6. Build the draft plan service, which needs the roster, the ADP
                comparison, and the projections.
             7. Build the three services that only talk to MongoDB and so need no
-               collaborators at all.
+               collaborators at all, plus the notes-transfer service over two of
+               them.
             8. Build the FFC repository and service, the app's only source of
                draft-position spread.
             9. Build the simulation service, since it depends on several of the
                above.
-            10. Build the Daily Fantasy repository. It depends on nothing else
-                and loads its own, shorter set of seasons.
+            10. Build the two Daily Fantasy repositories: the nflreadpy one,
+                which loads its own shorter set of seasons, and the salary one,
+                which reads the weekly slates out of MongoDB.
 
         Args:
             seasons: Which NFL seasons of game stats to make available, as a list
@@ -145,6 +149,14 @@ class AppContext:
         self.player_markings_service = PlayerMarkingsService()
         self.team_notes_service = TeamNotesService()
 
+        # Copies your own notes and tags between saved leagues. Works through
+        # the two services above rather than the database, so it can never get
+        # out of step with how a marking is normally written.
+        self.notes_transfer_service = NotesTransferService(
+            self.player_markings_service,
+            self.team_notes_service,
+        )
+
         # Fantasy Football Calculator — the app's only source of draft-position
         # SPREAD (stdev), which the draft model needs alongside ADP. Unlike the
         # other sources this one is keyed by FFC's own ids, so FfcService attaches
@@ -165,3 +177,7 @@ class AppContext:
         # DFS wants a few years of play-by-play, snap counts and expected
         # points. Nothing loads until a DFS page asks for it.
         self.dfs_read_repo = DfsReadRepo(dfs_seasons or seasons)
+
+        # This week's prices, and every week's before it. Written by
+        # scripts/load_salaries.py rather than by the app.
+        self.dfs_salary_repo = DfsSalaryRepo()

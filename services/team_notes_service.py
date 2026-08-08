@@ -7,7 +7,7 @@ collection, read/written one document at a time via db/documents.py.
 """
 
 from registry import Collections
-from db.documents import find_one, upsert
+from db.documents import find_all, find_one, upsert
 
 
 class TeamNotesService:
@@ -76,3 +76,24 @@ class TeamNotesService:
             {"draft_id": draft_id, "team_abbr": team_abbr},
             {"draft_id": draft_id, "team_abbr": team_abbr, "notes": notes},
         )
+
+    def all_for_draft(self, draft_id):
+        """Load every team note for one draft, in a single query.
+
+        The counterpart to `PlayerMarkingsService.all_for_draft`. Needed by
+        anything that works on a whole draft at once rather than a team at a
+        time -- copying notes between leagues, for instance.
+
+        Steps:
+            1. Call `find_all` from db/documents.py, filtering on the draft id
+               only so every team in that draft comes back.
+
+        Args:
+            draft_id: Which draft's notes to read.
+
+        Returns:
+            list: One dictionary per team that has a note, each with `draft_id`,
+                `team_abbr` and `notes`. Teams never written about simply do not
+                appear, so callers should not expect an entry for all 32.
+        """
+        return find_all(Collections.TEAM_NOTES, {"draft_id": draft_id})
