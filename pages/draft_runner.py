@@ -18,6 +18,7 @@ import streamlit as st
 
 from presentation.charts import cost_of_waiting_chart
 from presentation.colors import position_legend_html
+from presentation.marks import mark_column_config
 from draft_model.queries import positional_cliffs
 from presentation.draft_board_view import (
     build_board_grid, build_position_grid, cliff_frame, entries_from_pick_log,
@@ -38,41 +39,47 @@ from services.draft_runner_service import (
     team_players, team_strength_table,
 )
 from streamlit_state import get_app_context
-from ui_helpers import adp_to_round_pick, cached_resim, draft_selector, load_sim_board
+from ui_helpers import (draft_selector, adp_to_round_pick, load_sim_board,
+                        load_platform_adp, cached_resim)
 
 
 ctx = get_app_context()
 YEAR = 2026
 
+# The roster panel. `Player` is the one column left flexible -- names run from
+# "Bo Nix" to "Marvin Harrison Jr." and a fixed width either truncates the long
+# ones or wastes the column on the short ones.
+ROSTER_COLUMNS = {
+    "Slot":   st.column_config.TextColumn("Slot", width=40),
+    "Player": st.column_config.TextColumn("Player", width=130),
+    "Pos":    st.column_config.TextColumn("Pos", width=40),
+    "Proj":   st.column_config.NumberColumn("Proj", width=60, format="%.0f"),
+}
+
 # The drop-off table beside the cost chart. Short headers on purpose -- it sits
 # in a narrow column and every word competes with the numbers.
 STRENGTH_COLUMNS = {
-    "Category": st.column_config.TextColumn("Category", width=140),
+    "Category": st.column_config.TextColumn("Category", width=120),
     "Team": st.column_config.TextColumn("Team", width=100),
     "Value": st.column_config.NumberColumn(
-        "Value", width=85, format="%.1f",
+        "Value", width=60, format="%.1f",
         help="Projected fantasy points, except for Replacement, which is a gap "
              "in points between two players.",
     ),
     "Rank": st.column_config.NumberColumn(
-        "Rank", width=65, format="%.0f",
+        "Rank", width=50, format="%.0f",
         help="Where this team places on this category, 1 being best. Blank "
              "means it could not be measured -- not that the team is last.",
     ),
     "Best": st.column_config.NumberColumn(
-        "Best", width=75, format="%.1f",
+        "Best", width=60, format="%.1f",
         help="The best any team in the league manages on this category.",
     ),
     "Worst": st.column_config.NumberColumn(
-        "Worst", width=75, format="%.1f",
+        "Worst", width=60, format="%.1f",
         help="The worst any team in the league manages on this category.",
     ),
 }
-"""Column settings shared by both strength views. One dict rather than two
-because the two views draw from the same table and a column means the same thing
-in each -- Streamlit ignores entries for columns a frame does not have, so the
-extras cost nothing."""
-
 
 CLIFF_COLUMNS = {
     "Pos": st.column_config.TextColumn("Pos", width=55),
@@ -372,94 +379,148 @@ else:
         header += f" · your next pick: {mine[0]}"
     st.markdown(header)
 
-controls = st.columns([1, 1, 1.4, 5])
-with controls[0]:
-    if st.button("Undo", icon=":material/undo:", disabled=not state.picks,
-                 width="stretch"):
-        state.rewind_to(state.current_pick - 1)
-        persist()
-        st.rerun()
-with controls[1]:
-    with st.popover("Rewind", width="stretch"):
-        target = st.number_input("Rewind to pick", 1, board.config.total_picks,
-                                 value=max(1, state.current_pick - 1))
-        if st.button("Rewind", type="primary"):
-            discarded = state.rewind_to(int(target))
-            persist()
-            st.toast(f"Discarded {discarded} pick(s).")
-            st.rerun()
+# The cost-of-waiting panel follows whoever is on the clock rather than always
+# describing you. Watching each manager's urgency in turn is how a positional run
+# becomes visible before it arrives at your pick.
+#
+# Computed BEFORE the container so the three columns below can be laid out
+# unconditionally -- an empty middle column is better than a container whose
+# shape changes when the draft ends.
+costs = pd.DataFrame()
+clock_picks, whose = None, None
+if not state.is_complete:
+    on_clock = state.on_the_clock
+    costs = positional_costs_for_team(state, board, picks, on_clock)
+    if not costs.empty:
+        clock_picks = team_picks_from(state, on_clock, state.current_pick)
+        whose = "Your" if on_clock == board.config.draft_position else f"Team {on_clock}'s"
 
-# Live drafts only. Opponents take players FFC has no ADP for -- kickers,
-# defenses, a name you did not catch -- and that pick still has to consume a pick
-# number or every later one is off by one. Recording a position keeps their
-# roster count right too, so the simulator keeps modelling their needs.
-# In a sim the AI does the picking, so this cannot arise.
-if not sim_mode and not state.is_complete:
-    with controls[2]:
-        with st.popover("Pick not listed", width="stretch"):
-            st.caption(f"Team {state.on_the_clock} took someone not in the pool.")
-            unlisted_position = st.selectbox(
-                "Position", POSITIONS, key="dr_unlisted_pos",
-                help="Recorded so this team's roster count stays right.",
-            )
-            if st.button("Record pick", type="primary", key="dr_unlisted_go"):
-                state.make_pick(source="unknown", position=unlisted_position)
-                while state.apply_keeper_if_due():
-                    pass
+# ---------------------------------------------------------------------------
+# Control panel: what you can do, the price of waiting, and the countdown
+# ---------------------------------------------------------------------------
+# Cost and cliff answer the same question from two directions. Cost is the PRICE
+# of waiting; the cliff is the COUNTDOWN and the reason for it. Beside the
+# controls, "RB is urgent" arrives with "because 3 are left before a 46-point
+# drop" AND the button you would press about it.
+with st.expander("Controls + Metrics"):
+    settings_col, price, countdown = st.columns([3, 4, 3])
+
+    # --- left: the runner's own controls ------------------------------------
+    with settings_col:
+        st.caption("Controls")
+
+        # A horizontal container rather than nested st.columns: it sizes each
+        # child to its content, so the buttons stay legible in a narrow column
+        # instead of being squeezed by a fixed ratio.
+        with st.container(horizontal=True):
+            if st.button("Undo", icon=":material/undo:", disabled=not state.picks):
+                state.rewind_to(state.current_pick - 1)
                 persist()
                 st.rerun()
 
-if sim_mode and not state.is_complete:
-    sim_controls = st.columns([1, 1, 1, 5])
+            with st.popover("Rewind"):
+                target = st.number_input("Rewind to pick", 1, board.config.total_picks,
+                                         value=max(1, state.current_pick - 1))
+                if st.button("Rewind", type="primary"):
+                    discarded = state.rewind_to(int(target))
+                    persist()
+                    st.toast(f"Discarded {discarded} pick(s).")
+                    st.rerun()
 
-    with sim_controls[0]:
-        if st.button("Pause" if playing else "Play",
-                     icon=":material/pause:" if playing else ":material/play_arrow:",
-                     type="primary", width="stretch", disabled=your_turn):
-            st.session_state[play_key] = not playing
-            st.rerun()
+            # Live drafts only. Opponents take players FFC has no ADP for --
+            # kickers, defenses, a name you did not catch -- and that pick still
+            # has to consume a pick number or every later one is off by one.
+            # Recording a position keeps their roster count right too, so the
+            # simulator keeps modelling their needs. In a sim the AI picks, so
+            # this cannot arise.
+            if not sim_mode and not state.is_complete:
+                with st.popover("Pick not listed"):
+                    st.caption(f"Team {state.on_the_clock} took someone not in the pool.")
+                    unlisted_position = st.selectbox(
+                        "Position", POSITIONS, key="dr_unlisted_pos",
+                        help="Recorded so this team's roster count stays right.",
+                    )
+                    if st.button("Record pick", type="primary", key="dr_unlisted_go"):
+                        state.make_pick(source="unknown", position=unlisted_position)
+                        while state.apply_keeper_if_due():
+                            pass
+                        persist()
+                        st.rerun()
 
-    with sim_controls[1]:
-        if st.button("Step", icon=":material/skip_next:", width="stretch",
-                     disabled=your_turn):
-            advance_one()
-            st.rerun()
+        if sim_mode and not state.is_complete:
+            with st.container(horizontal=True):
+                if st.button("Pause" if playing else "Play",
+                             icon=":material/pause:" if playing else ":material/play_arrow:",
+                             type="primary", disabled=your_turn):
+                    st.session_state[play_key] = not playing
+                    st.rerun()
 
-    with sim_controls[2]:
-        if st.button("To my pick", icon=":material/fast_forward:", width="stretch",
-                     disabled=your_turn):
-            advance_until_your_turn(state, board, boards)
-            persist()
-            st.rerun()
+                if st.button("Step", icon=":material/skip_next:", disabled=your_turn):
+                    advance_one()
+                    st.rerun()
 
-    if your_turn and playing:
-        # Reached your turn: stop the clock rather than picking for you.
-        st.session_state[play_key] = False
-        playing = False
+                if st.button("To my pick", icon=":material/fast_forward:",
+                             disabled=your_turn):
+                    advance_until_your_turn(state, board, boards)
+                    persist()
+                    st.rerun()
 
-    # A FRAGMENT is a piece of the page Streamlit can rerun on its own, and
-    # `run_every` makes it tick. Passing None when paused stops the timer
-    # entirely rather than firing every three seconds to do nothing.
-    @st.fragment(run_every="3s" if playing else None)
-    def autoplay_tick():
-        """Take one AI pick per tick while autoplay is running."""
-        if not st.session_state.get(play_key):
-            return
-        if state.is_complete or state.on_the_clock == board.config.draft_position:
-            st.session_state[play_key] = False
-            st.rerun(scope="app")
-            return
-        advance_one()
-        # scope="app" is essential. Without it only this fragment refreshes, and
-        # the board, console and rosters keep showing the previous pick.
-        st.rerun(scope="app")
+            if your_turn and playing:
+                # Reached your turn: stop the clock rather than picking for you.
+                st.session_state[play_key] = False
+                playing = False
 
-    autoplay_tick()
+            # A FRAGMENT is a piece of the page Streamlit can rerun on its own,
+            # and `run_every` makes it tick. Passing None when paused stops the
+            # timer entirely rather than firing every three seconds to do nothing.
+            @st.fragment(run_every="3s" if playing else None)
+            def autoplay_tick():
+                """Take one AI pick per tick while autoplay is running."""
+                if not st.session_state.get(play_key):
+                    return
+                if state.is_complete or state.on_the_clock == board.config.draft_position:
+                    st.session_state[play_key] = False
+                    st.rerun(scope="app")
+                    return
+                advance_one()
+                # scope="app" is essential. Without it only this fragment
+                # refreshes, and the board, console and rosters keep showing the
+                # previous pick.
+                st.rerun(scope="app")
 
-    if playing:
-        st.caption(":material/autoplay: Simulating — one pick every 3 seconds.")
-    elif your_turn:
-        st.caption(":material/pan_tool: You are on the clock. Draft below to continue.")
+            autoplay_tick()
+
+            if playing:
+                st.caption(":material/autoplay: Simulating — one pick every 3 seconds.")
+            elif your_turn:
+                st.caption(":material/pan_tool: You are on the clock. Draft below.")
+
+    # --- middle: what waiting costs -----------------------------------------
+    with price:
+        if clock_picks is not None:
+            st.caption(f"{whose} cost of waiting — pick {clock_picks[0]} to their "
+                       f"next at {clock_picks[1]}. Longest bar is the most urgent "
+                       f"position; hover for the number.")
+            st.altair_chart(cost_of_waiting_chart(costs),
+                            width="stretch", height=200)
+        else:
+            st.caption("Cost of waiting")
+            st.caption("Nothing left to wait on.")
+
+    # --- right: how many are left before the drop ---------------------------
+    with countdown:
+        st.caption("Next drop-off — how many are left at each position before "
+                   "value falls away, most urgent first.")
+        cliffs = positional_cliffs(available["position"], available["projection"])
+        if cliffs:
+            st.dataframe(
+                cliff_frame(cliffs).style.apply(
+                    tint_positions_column(cliffs), axis=None),
+                hide_index=True, width="stretch", height = 180,
+                column_config=CLIFF_COLUMNS,
+            )
+        else:
+            st.caption("Not enough players left to measure a drop-off.")
 
 # "Both" first and default: while a sim runs you want to watch the board fill
 # AND work the console, which is the whole reason this page has two views.
@@ -520,49 +581,10 @@ if not show_console:
     # through into the console.
     st.stop()
 
-# The cost-of-waiting panel follows whoever is on the clock rather than always
-# describing you. Watching each manager's urgency in turn is how a positional run
-# becomes visible before it arrives at your pick.
-if not state.is_complete:
-    on_clock = state.on_the_clock
-    costs = positional_costs_for_team(state, board, picks, on_clock)
-    if not costs.empty:
-        clock_picks = team_picks_from(state, on_clock, state.current_pick)
-        whose = "Your" if on_clock == board.config.draft_position else f"Team {on_clock}'s"
-
-        # Cost and cliff answer the same question from two directions. Cost is
-        # the PRICE of waiting; the cliff is the COUNTDOWN and the reason for it.
-        # Side by side, "RB is urgent" comes with "because 3 are left before a
-        # 46-point drop", which is the part you can actually act on.
-        with st.container(border=True):
-            price, countdown = st.columns([3, 2])
-
-            with price:
-                st.caption(f"{whose} cost of waiting — pick {clock_picks[0]} "
-                           f"to their next at {clock_picks[1]}. Longest bar is the "
-                           f"most urgent position; hover for the number.")
-                st.altair_chart(cost_of_waiting_chart(costs),
-                                use_container_width=True, height=300)
-
-            with countdown:
-                st.caption("Next drop-off — how many are left at each position "
-                           "before value falls away, most urgent first.")
-                cliffs = positional_cliffs(available["position"],
-                                           available["projection"])
-                if cliffs:
-                    st.dataframe(
-                        cliff_frame(cliffs).style.apply(
-                            tint_positions_column(cliffs), axis=None),
-                        hide_index=True, width="stretch", height=250,
-                        column_config=CLIFF_COLUMNS,
-                    )
-                else:
-                    st.caption("Not enough players left to measure a drop-off.")
-
 # Sharing the screen with the board costs vertical room, so the console's two
 # tables give some back. They scroll internally either way -- this only decides
 # how much you see without scrolling the page itself.
-console_height = 420 if show_board else 560
+console_height = 520 if show_board else 660
 
 console, rosters = st.columns([3, 1])
 
@@ -605,10 +627,19 @@ with console:
     avail_pick = avail_target_pick(state)
     next_pick_column = f"P@{avail_pick}" if avail_pick else None
 
+    # Where the market has each player going. Keyed by canonical_id, which is
+    # what the ADP comparison is built on.
+    plat_adp_by_id = load_platform_adp(ctx, draft["platform"], draft["scoring_format"])
+
+    # The simulation's own ADP, from the SAVED pre-draft run rather than the live
+    # re-simulation -- an ADP is where a player goes in a draft that has not
+    # started, so it must not move as this one unfolds.
+    #
+    # Keyed by ffc_player_id, NOT canonical_id: team defenses never resolve to a
+    # canonical id, and they are in this pool.
+    sim_adp_by_ffc = dict(zip(board.table["ffc_player_id"], board.simulated_adp))
+
     grid = pd.DataFrame({
-        # The button's LABEL is the player's name, which makes the handler robust
-        # to sorting -- see draft_player below.
-        "Draft": shown["name"],
         # A star for anyone already on your plan for this round. Made a real
         # column rather than a cell tint so it can be SORTED on, which groups
         # your targets together -- and because st.data_editor applies a Styler
@@ -616,16 +647,20 @@ with console:
         "Plan": shown["canonical_id"].map(
             lambda cid: "★" if cid in planned_ids else ""
         ),
-        "Pos": shown["position"],
-        "Proj": shown["projection"],
+        # The button's LABEL is the player's name, which makes the handler robust
+        # to sorting -- see draft_player below. It is also the only place the
+        # name appears, so this column identifies the row.
+        "Draft": shown["name"],
         "Tier": shown["tier"],
-        # UDK's own read on a player, and the only thing in this table that is
-        # not derived from the projection. Risk is barely correlated with
-        # projected points (-0.11), so it says something the rest of the row
-        # does not -- which is exactly when two similar players separate.
-        "Risk": shown["risk"],
-        "Ups": shown["upside"],
-        "ADP": shown["adp_target"].map(lambda a: adp_to_round_pick(a, board.config.num_teams)),
+        "Proj": shown["projection"],
+        # Both ADPs in the same ROUND.PICK encoding, so they read against each
+        # other: the float 1.04 means round 1 pick 4 and still sorts numerically.
+        "PlatAdp": shown["canonical_id"].map(plat_adp_by_id).map(
+            lambda a: adp_to_round_pick(a, board.config.num_teams)
+        ),
+        "SimAdp": shown["ffc_player_id"].map(sim_adp_by_ffc).map(
+            lambda a: adp_to_round_pick(a, board.config.num_teams)
+        ),
     })
     if next_pick_column:
         grid["Avail"] = shown[next_pick_column]
@@ -672,34 +707,30 @@ with console:
         persist()
 
     column_config = {
+        "Plan": st.column_config.TextColumn(
+            "Plan", width=40, pinned=True,
+            help=(f"★ marks players you planned for round {planned_round} on the "
+                  f"Draft Plan page. Sort by this column to group them."
+                  if planned_round else "Your saved draft plan for this round."),
+        ),
         "Draft": st.column_config.ButtonColumn(
             "Draft", key="dr_draft_click", on_click=draft_player,
             width="medium", pinned=True,
             help="Click a player to record him as this pick.",
         ),
-        "Plan": st.column_config.TextColumn(
-            "Plan", width=55,
-            help=(f"★ marks players you planned for round {planned_round} on the "
-                  f"Draft Plan page. Sort by this column to group them."
-                  if planned_round else "Your saved draft plan for this round."),
-        ),
-        "Proj": st.column_config.NumberColumn("Proj", width=70, format="%.0f"),
         "Tier": st.column_config.NumberColumn("Tier", width=55, format="%d"),
-        "ADP":  st.column_config.NumberColumn("ADP", width=65, format="%.2f"),
-        # LOWER is better here, which is the opposite of every other number in
-        # this table -- worth saying plainly, because sorting ascending is the
-        # right move for Risk and the wrong one everywhere else.
-        "Risk": st.column_config.NumberColumn(
-            "Risk", width=60, format="%.1f",
-            help="UDK's injury and bust risk, 0.5 to 9.5. LOWER is safer. "
-                 "Barely related to projected points, so it separates players "
-                 "the rest of this row cannot. Blank for K and DST.",
+        "Proj": st.column_config.NumberColumn("Proj", width=70, format="%.0f"),
+        # "%.2f" turns the encoded float 1.04 into the text "1.04".
+        "PlatAdp": st.column_config.NumberColumn(
+            "PlatAdp", width=80, format="%.2f",
+            help="Where your league's platform has him going, as ROUND.PICK. "
+                 "Blank if that platform doesn't rank him.",
         ),
-        "Ups": st.column_config.NumberColumn(
-            "Ups", width=60, format="%.1f",
-            help="UDK's upside, 0.5 to 10. HIGHER is better. Tracks projected "
-                 "points closely, so treat it as confirmation rather than new "
-                 "information. Blank for K and DST.",
+        "SimAdp": st.column_config.NumberColumn(
+            "SimAdp", width=80, format="%.2f",
+            help="The average pick he went at across the saved pre-draft "
+                 "simulation, as ROUND.PICK. Does not move as this draft "
+                 "unfolds. Blank for a kept player.",
         ),
     }
     if next_pick_column:
@@ -717,8 +748,12 @@ with console:
                   "should offer something better later, so spend this pick "
                   "elsewhere."),
         )
-    for category in MARKING_CATEGORIES:
-        column_config[category] = st.column_config.CheckboxColumn(category, width=60)
+    # Headers, tooltips and widths come from presentation/marks.py, so this
+    # console cannot disagree with the draft plan board or the team profile
+    # editor. No position argument: every category shows on every row, which is
+    # what the save loop below assumes.
+    for column, settings in mark_column_config(editable=True).items():
+        column_config[column] = st.column_config.CheckboxColumn(**settings)
 
     # The key changes every pick ON PURPOSE. st.data_editor tracks edits by row
     # position, and this table loses a row every pick -- a stale key would apply
@@ -726,8 +761,7 @@ with console:
     edited = st.data_editor(
         grid, hide_index=True, width="stretch", height=console_height,
         num_rows="fixed",              # anything else disables column sorting
-        disabled=["Plan", "Pos", "Proj", "Tier", "Risk", "Ups", "ADP",
-                  "Avail", "Cost"],
+        disabled=["Plan", "Tier", "Proj", "PlatAdp", "SimAdp", "Avail", "Cost"],
         column_config=column_config,
         key=f"dr_console_{len(state.picks)}",
     )
@@ -749,104 +783,92 @@ with console:
             )
 
 with rosters:
-    team = st.selectbox("Team", range(1, board.config.num_teams + 1),
-                        index=board.config.draft_position - 1,
-                        format_func=lambda t: f"Team {t}"
-                        + (" (you)" if t == board.config.draft_position else ""))
-    lineup = slot_roster(team_players(state, board, team),
-                         board.config.starting_slots)
-    st.dataframe(roster_frame(lineup), hide_index=True, width="stretch",
-                 height=console_height,
-                 column_config={"Proj": st.column_config.NumberColumn(
-                     "Proj", width=60, format="%.0f")})
+    # One dropdown decides what this column IS: a roster, or one of the two
+    # strength views. A selectbox rather than a segmented control because three
+    # labels will not sit across a quarter-width column.
+    panel = st.selectbox(
+        "Panel", ["Team", "Team Ratings", "By Category"],
+        key="dr_rosters_panel",
+    )
 
-
-# ---------------------------------------------------------------------------
-# Team strengths
-# ---------------------------------------------------------------------------
-st.divider()
-
-with st.container(border=True):
-    st.markdown("**Team strengths**")
-
-    heading = st.columns([2.4, 2.2, 4])
-    with heading[0]:
-        # `required` stops a second click on the active option clearing the
-        # choice. Without it the control returns None and the panel vanishes.
-        fill_mode = st.segmented_control(
-            "Rosters", ["Projected final", "As drafted"],
-            default="Projected final", key="strength_fill", required=True,
-        )
-    with heading[1]:
-        strength_view = st.segmented_control(
-            "View", ["My team", "By category"],
-            default="My team", key="strength_view", required=True,
-        )
-
-    # A stale widget key can still hand back something invalid, and every number
-    # below depends on which of these is set.
-    fill_mode = fill_mode if fill_mode in ("Projected final", "As drafted") \
-        else "Projected final"
-    strength_view = strength_view if strength_view in ("My team", "By category") \
-        else "My team"
-
-    projected = fill_mode == "Projected final"
-    with heading[2]:
-        st.caption(
-            "Every roster filled out by simulating the rest of the draft — "
-            "where each team is HEADING. Early on this is mostly simulation, so "
-            "it largely reflects draft slot."
-            if projected else
-            "Only players actually drafted so far — what each team HAS. Empty "
-            "lineup slots count at replacement level, not zero."
-        )
-
-    # `roster` carries UDK's risk and upside ratings, joined on canonical id.
-    # Passing it in is what adds the risk and upside rows; leave it out and the
-    # rest of the panel is unaffected.
-    strengths = team_strength_table(state, board, picks, projected=projected,
-                                    ratings=roster)
-    num_teams = board.config.num_teams
-
-    if strength_view == "My team":
-        st.dataframe(
-            my_team_frame(strengths, board.config.draft_position)
-            .style.apply(shade_ranks(num_teams), axis=None),
-            hide_index=True, width="stretch", height=560,
-            column_config=STRENGTH_COLUMNS,
-        )
-        st.caption(f"Rank is out of {num_teams} teams, 1 being best. Best and "
-                   "worst are the league's, so you can see whether a rank is a "
-                   "real gap or a crowd. Lower is better for Replacement — the "
-                   "drop from your worst starter to your best backup, so small "
-                   "means depth — and for Risk.")
-        st.caption("Risk and upside are measured against players projected "
-                   "alike, so 0 is typical for the position and they say "
-                   "something the projection does not. Upside counts your best "
-                   f"{BEST_N_UPSIDE} — one real lottery ticket is the point, and "
-                   "an average would let a bust cancel a boom. Risk is weighted "
-                   "by projection, since a shaky RB1 matters and a shaky WR3 "
-                   "does not. There is no bench risk on purpose: a bench is "
-                   "where fliers belong.")
+    if panel == "Team":
+        team = st.selectbox("Team", range(1, board.config.num_teams + 1),
+                            index=board.config.draft_position - 1,
+                            format_func=lambda t: f"Team {t}"
+                            + (" (you)" if t == board.config.draft_position else ""))
+        lineup = slot_roster(team_players(state, board, team),
+                             board.config.starting_slots)
+        st.dataframe(roster_frame(lineup), hide_index=True, width="stretch",
+                     height=console_height, column_config=ROSTER_COLUMNS)
     else:
-        options = category_options(strengths)
-        if not options:
-            st.caption("Nothing to compare yet.")
-        else:
-            group, category = st.selectbox(
-                "Category", options, key="strength_category",
-                format_func=lambda key: category_label(*key),
-            )
-            ranked = category_frame(strengths, group, category)
+        # Which rosters the numbers describe. Only means anything to the two
+        # strength views, so it lives in this branch rather than above the split.
+        # The explanation is a tooltip rather than a caption: in a column this
+        # narrow, two sentences of prose cost more height than the table.
+        fill_mode = st.selectbox(
+            "Rosters", ["Projected final", "As drafted"],
+            key="dr_strength_fill",
+            help="**Projected final** fills every roster out by simulating the "
+                 "rest of the draft — where each team is HEADING. Early on that "
+                 "is mostly simulation, so it largely reflects draft slot.\n\n"
+                 "**As drafted** counts only players actually taken so far — "
+                 "what each team HAS. Empty lineup slots count at replacement "
+                 "level, not zero.",
+        )
+        projected = fill_mode == "Projected final"
+
+        # `roster` carries UDK's risk and upside ratings, joined on canonical id.
+        # Passing it in is what adds the risk and upside rows; leave it out and
+        # the rest of the panel is unaffected.
+        #
+        # Built inside this branch, so selecting "Team" skips the work entirely.
+        strengths = team_strength_table(state, board, picks, projected=projected,
+                                        ratings=roster)
+        num_teams = board.config.num_teams
+
+        if panel == "Team Ratings":
             st.dataframe(
-                ranked.drop(columns="slot").style.apply(
-                    highlight_my_team(ranked["slot"], board.config.draft_position),
-                    axis=None),
-                hide_index=True, width="stretch", height=460,
+                my_team_frame(strengths, board.config.draft_position)
+                .style.apply(shade_ranks(num_teams), axis=None),
+                hide_index=True, width="stretch", height=console_height,
                 column_config=STRENGTH_COLUMNS,
             )
-            st.caption("Your row is shaded. "
-                       + ("Lower is better here — it is the drop from the worst "
-                          "starter to the best backup, so a small number means "
-                          "depth." if group in LOWER_IS_BETTER else
-                          "Higher is better."))
+            st.caption(
+                f"Rank is out of {num_teams}, 1 being best.",
+                help="Best and worst are the league's, so you can see whether a "
+                     "rank is a real gap or a crowd. Lower is better for "
+                     "Replacement — the drop from your worst starter to your "
+                     "best backup, so small means depth — and for Risk.\n\n"
+                     "Risk and upside are measured against players projected "
+                     "alike, so 0 is typical for the position and they say "
+                     "something the projection does not. Upside counts your best "
+                     f"{BEST_N_UPSIDE} — one real lottery ticket is the point, "
+                     "and an average would let a bust cancel a boom. Risk is "
+                     "weighted by projection, since a shaky RB1 matters and a "
+                     "shaky WR3 does not. There is no bench risk on purpose: a "
+                     "bench is where fliers belong.",
+            )
+        else:
+            options = category_options(strengths)
+            if not options:
+                st.caption("Nothing to compare yet.")
+            else:
+                group, category = st.selectbox(
+                    "Category", options, key="strength_category",
+                    format_func=lambda key: category_label(*key),
+                )
+                ranked = category_frame(strengths, group, category)
+                st.dataframe(
+                    ranked.drop(columns="slot").style.apply(
+                        highlight_my_team(ranked["slot"],
+                                          board.config.draft_position),
+                        axis=None),
+                    hide_index=True, width="stretch", height=console_height,
+                    column_config=STRENGTH_COLUMNS,
+                )
+                st.caption("Your row is shaded. "
+                           + ("Lower is better here — it is the drop from the "
+                              "worst starter to the best backup, so a small "
+                              "number means depth."
+                              if group in LOWER_IS_BETTER else
+                              "Higher is better."))
