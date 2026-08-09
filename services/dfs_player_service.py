@@ -666,3 +666,310 @@ def slate(frame, season, week, positions=None, teams=None,
 
     return rows.sort_values("total_fantasy_points", ascending=False,
                             na_position="last").reset_index(drop=True)
+
+def played_before(frame, season, week):
+    """Keep the games played strictly before a given week, newest orderable.
+
+    Everything on the Daily Fantasy player page looks BACKWARDS from a week you
+    are building a lineup for, and that week is usually one nobody has played --
+    so "his recent form" has to reach into the previous season rather than stop
+    at a season boundary.
+
+    Steps:
+        1. Turn each row's season and week into one sortable number, so "before
+           this week" and "most recent first" are each a single comparison
+           rather than a pair of them.
+        2. Keep the rows below the target.
+
+    Args:
+        frame: Player-weeks, any number of seasons.
+        season: The season being built for.
+        week: The week being built for.
+
+    Returns:
+        pd.DataFrame: The rows before that week, with an extra `_when` column
+            holding the sortable number. Empty if nothing qualifies.
+
+    Note:
+        STRICTLY BEFORE. If the target week has already been played -- which it
+        will have been for any week you look back at -- including it would put
+        the result inside the form used to predict it.
+    """
+    rows = frame.copy()
+    rows["_when"] = (rows["season"].astype(int) * 100
+                     + rows["week"].astype(int))
+    return rows[rows["_when"] < int(season) * 100 + int(week)]
+
+
+def last_games(frame, games):
+    """Keep each player's most recent few games, however they are spread.
+
+    Every comparison on the page is "his last five against everybody else's last
+    five", so each player's window is cut from HIS OWN games. A player who missed
+    three weeks is still averaged over five games he actually played, rather than
+    over whatever happens to sit in a fixed range of weeks.
+
+    Steps:
+        1. Order each player's rows newest first, using the `_when` column
+           `played_before` above attaches.
+        2. Keep the first few of each.
+
+    Args:
+        frame: The output of `played_before` above.
+        games: How many games to keep per player.
+
+    Returns:
+        pd.DataFrame: The same columns, cut to at most `games` rows per player.
+    """
+    if frame.empty:
+        return frame
+    return (frame.sort_values(["canonical_id", "_when"], ascending=[True, False])
+            .groupby("canonical_id", as_index=False, group_keys=False)
+            .head(int(games)))
+
+
+def upcoming_week(frame):
+    """Guess which week a lineup would be built for, from the games played.
+
+    Used as a fallback when no salary slate has been loaded to say so directly.
+
+    Steps:
+        1. Find the most recent season and week that have rows.
+        2. Return the week after it, rolling into week 1 of the next season once
+           a regular season is done.
+
+    Args:
+        frame: Player-weeks, any number of seasons.
+
+    Returns:
+        tuple: `(season, week)`. `(None, None)` when the frame is empty.
+    """
+    if frame.empty:
+        return None, None
+
+    newest = frame.loc[(frame["season"].astype(int) * 100
+                        + frame["week"].astype(int)).idxmax()]
+    season, week = int(newest["season"]), int(newest["week"])
+    return (season, week + 1) if week < 18 else (season + 1, 1)
+
+
+def weekly_percentiles(frame, canonical_id, fields, when, minimum_snaps=1):
+    """Rank one player against his position, week by week, on several stats.
+
+    Stats measured in different units cannot share an axis or a colour scale --
+    fantasy points run to forty, EPA to about one, target share to a third.
+    Turning each into a PERCENTILE among the players he is competing with makes
+    them comparable, and answers a more useful question than the raw number
+    does: not "how many targets" but "how good a week was that for a receiver".
+
+    Steps:
+        1. Make sure the frame carries the sortable season-and-week number, so
+           weeks from different seasons cannot collide.
+        2. Read his position off his most recent row.
+        3. Gather everybody at his position who played in the weeks asked for,
+           above a snap floor -- see the note.
+        4. Rank every peer within each week, one stat at a time, flipping the
+           handful where a smaller number is better.
+        5. Keep his own placings.
+
+    Args:
+        frame: Player-weeks for EVERY player. Ranking needs the field he is
+            being compared against.
+        canonical_id: The player being ranked.
+        fields: Which columns to rank, as column names.
+        when: The season-and-week numbers to rank at, as produced by
+            `played_before` above. Any iterable; usually one player's own rows.
+        minimum_snaps: How many offensive snaps a peer needs before he counts.
+            The player himself is always included whatever his snap count.
+
+    Returns:
+        pd.DataFrame: Long format, one row per week per stat, with `when` (the
+            sortable number), `period` (a short label such as "25W18"), `stat`,
+            `percentile` (0-100, HIGHER ALWAYS MEANING BETTER PLACED) and
+            `value` (the raw number). Empty with those columns when nothing
+            qualifies.
+
+    Note:
+        TAKES THE WEEKS RATHER THAN WORKING THEM OUT. One caller wants his last
+        five games and another wants a whole season, and neither is a special
+        case of the other -- so the choice belongs to them.
+
+        THE SNAP FLOOR IS LOAD-BEARING. A position's weekly rows include every
+        practice-squad player who took a single snap, and ranking against them
+        would put a mediocre starter in the 95th percentile every week.
+
+        RANKED WITHIN EACH WEEK SEPARATELY, so a week when everybody scored is
+        not mistaken for a good week by this player.
+    """
+    from presentation.dfs_gamelog import direction_of
+
+    blank = pd.DataFrame(columns=["when", "period", "stat", "percentile",
+                                  "value"])
+
+    when = list(when)
+    if frame.empty or not fields or not when:
+        return blank
+
+    rows = frame if "_when" in frame.columns else frame.assign(
+        _when=frame["season"].astype(int) * 100 + frame["week"].astype(int))
+
+    his = rows[rows["canonical_id"] == canonical_id]
+    if his.empty:
+        return blank
+
+    position = his.sort_values("_when")["position"].iloc[-1]
+
+    # He is kept whatever his snap count -- excluding the subject from his own
+    # comparison would drop the week entirely.
+    peers = rows[(rows["position"] == position)
+                 & (rows["_when"].isin(when))
+                 & ((rows["offense_snaps"].fillna(0) >= minimum_snaps)
+                    | (rows["canonical_id"] == canonical_id))]
+
+    mine = peers["canonical_id"] == canonical_id
+
+    pieces = []
+    for field in fields:
+        if field not in peers.columns:
+            continue
+
+        direction = direction_of(field)
+        if direction is None:
+            continue          # no better end, so no ranking to give
+
+        values = pd.to_numeric(peers[field], errors="coerce")
+        ranked = values.groupby(peers["_when"]).rank(pct=True) * 100
+
+        # HIGHER ALWAYS MEANS BETTER PLACED once this returns, whichever way the
+        # underlying stat runs. Without the flip a week with four interceptions
+        # would read as a good one, in the plot and in the game log alike.
+        if direction == "lower":
+            ranked = 100 - ranked
+
+        pieces.append(pd.DataFrame({
+            "when": peers.loc[mine, "_when"],
+            # Two digits of season, so a window crossing New Year cannot show
+            # two columns both labelled "W1".
+            "period": (peers.loc[mine, "season"].astype(int) % 100).astype(str)
+                      + "W" + peers.loc[mine, "week"].astype(int).astype(str),
+            "stat": field,
+            "percentile": ranked[mine],
+            "value": values[mine],
+        }))
+
+    return pd.concat(pieces, ignore_index=True) if pieces else blank
+
+
+SNAPS_PER_GAME = 10
+"""Snaps per game a peer must average before he counts in a comparison.
+
+Multiplied by the window length, so a five-game window asks for fifty and a
+ten-game window for a hundred. Scaling it means the floor never has to be
+retuned when the window changes.
+
+Ten a game is roughly a rotational player -- low enough to keep genuine
+committee backs in, high enough to keep out the practice-squad rows that would
+otherwise put every starter in the ninetieth percentile.
+"""
+
+def window_summary(frame, canonical_id, fields, season, week, games=5,
+                   snaps_per_game=SNAPS_PER_GAME):
+    """Average a player's recent games, and say where each average places him.
+
+    The number and its context together. An average of 14 carries a game means
+    nothing on its own; "14 carries, which is the 88th percentile among backs
+    playing regularly" is a judgement you can act on.
+
+    Steps:
+        1. Keep the games played before the target week with `played_before`
+           above, so the window reaches into last season when the week being
+           built for is early in a new one.
+        2. Narrow to his position, and cut EVERY player to his own last few
+           games with `last_games` above -- see the note.
+        3. Total each peer's snaps across his window and keep those above the
+           floor. He is kept whatever his own snap count.
+        4. Average every requested stat per player.
+        5. Rank his average against theirs, one stat at a time, flipping the
+           handful where a smaller number is better.
+        6. Drop the stats he has no data for at all.
+
+    Args:
+        frame: Player-weeks for EVERY player and every loaded season.
+        canonical_id: The player being summarised.
+        fields: Which columns to average, as column names.
+        season: The season being built for.
+        week: The week being built for. Games from this week and later are
+            excluded.
+        games: How many recent games each player's window covers.
+        snaps_per_game: Multiplied by the window length to get the snap floor.
+
+    Returns:
+        pd.DataFrame: One row per stat, with `stat`, `average` and `percentile`
+            (0-100, higher always meaning better placed). The percentile is blank
+            for a stat with no better end. Stats with no average at all are left
+            out entirely.
+
+    Note:
+        EVERY PLAYER IS CUT TO HIS OWN LAST FEW GAMES, not to a fixed range of
+        weeks. A player who missed three of the last five is then averaged over
+        five games he actually played, which is what makes the comparison
+        apples-to-apples -- and it is how the Cheat Sheet's trailing form already
+        works.
+
+        THE SNAP FLOOR DECIDES WHAT THE PERCENTILES MEAN. Ranking against
+        everyone who took a snap puts a mediocre starter in the ninetieth
+        percentile. Raise it to make the comparison harsher.
+
+        THE PERCENTILE IS OF THE AVERAGE, not an average of weekly percentiles.
+        Those are different numbers, and this is the one that matches the value
+        shown beside it.
+    """
+    from presentation.dfs_gamelog import direction_of
+
+    blank = pd.DataFrame(columns=["stat", "average", "percentile"])
+
+    history = played_before(frame, season, week)
+    his = history[history["canonical_id"] == canonical_id]
+    if his.empty or not fields:
+        return blank
+
+    position = his.sort_values("_when")["position"].iloc[-1]
+    window = last_games(history[history["position"] == position], games)
+
+    snaps = window.groupby("canonical_id")["offense_snaps"].sum()
+    eligible = set(snaps[snaps >= snaps_per_game * int(games)].index)
+    eligible.add(canonical_id)          # never exclude the subject himself
+
+    peers = window[window["canonical_id"].isin(eligible)]
+    present = [field for field in fields if field in peers.columns]
+    if not present:
+        return blank
+
+    averages = peers.groupby("canonical_id")[present].mean(numeric_only=True)
+
+    rows = []
+    for field in present:
+        column = averages.get(field)
+        direction = direction_of(field)
+
+        percentile = float("nan")
+        if column is not None and direction is not None:
+            ranked = column.rank(pct=True) * 100
+            placing = ranked.get(canonical_id, float("nan"))
+            percentile = 100 - placing if direction == "lower" else placing
+
+        rows.append({"stat": field,
+                     "average": (column.get(canonical_id, float("nan"))
+                                 if column is not None else float("nan")),
+                     "percentile": percentile})
+
+    # A stat with no average is one this player has NO DATA for, which is not
+    # the same as a bad number and should not take up a row. It happens because
+    # the tracking sources only cover part of each position: a quarterback is
+    # absent from the Next Gen rushing table, and a running back rarely clears
+    # the receiving thresholds.
+    #
+    # A BLANK PERCENTILE IS DIFFERENT and is kept -- that is a stat with a real
+    # average and no better end (see UNRANKED in presentation/dfs_gamelog.py).
+    summary = pd.DataFrame(rows)
+    return summary[summary["average"].notna()].reset_index(drop=True)

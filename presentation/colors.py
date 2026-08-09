@@ -60,6 +60,11 @@ POSITION_COLORS_DARK = {
     "DST": "#898781",
 }
 
+SITE_COLORS = {
+    "FanDuel": "#1e6fd9",      # blue
+    "DraftKings": "#3fa34d",   # green
+}
+
 # How opaque a cell tint is. Low enough that the text on top stays readable and
 # the app's own light/dark surface still shows through -- which is what lets ONE
 # set of tints work in both themes without a media query, something a pandas
@@ -149,42 +154,56 @@ def position_legend_html():
     return ('<div style="font-size:0.8rem;opacity:0.8">'
             + "&nbsp;&nbsp;".join(parts) + "</div>")
 
+def badge_html(text, color, font_size="0.8rem", padding="0.05rem 0.45rem"):
+    """Build a small coloured pill.
+
+    Used wherever a short label needs to read at a glance rather than as one word
+    in a sentence — a position, a site, a price.
+
+    Steps:
+        1. Wash the background with a translucent version of the colour, using
+           `hex_to_rgba` above.
+        2. Outline it in the solid colour, which is what makes it read as a tag
+           rather than a highlight.
+        3. Leave the TEXT colour inherited.
+
+    Args:
+        text: What the pill says.
+        color: Its hue, as "#rrggbb".
+        font_size: Any CSS size. The default suits an inline tag; pass something
+            larger for a pill that should carry more weight.
+        padding: Any CSS padding, widened to match a larger font size.
+
+    Returns:
+        str: HTML for `st.markdown(..., unsafe_allow_html=True)`.
+
+    Note:
+        The BACKGROUND is translucent and the TEXT colour is inherited, which is
+        what lets one pill work on both the light and dark surface with no theme
+        check. Filling it solid would need light text on some hues and dark on
+        others.
+    """
+    return (f'<span style="display:inline-block;background:{hex_to_rgba(color)};'
+            f'border:1px solid {color};border-radius:4px;padding:{padding};'
+            f'font-size:{font_size};font-weight:600;line-height:1.4">'
+            f'{html.escape(str(text))}</span>')
+
+
 def position_badge_html(position):
     """Build a small coloured pill showing one player's position.
 
-    Used where a position needs to read at a glance rather than as one word in a
-    sentence — the player profile's subtitle, for instance. Colour is the same
-    one the draft board and the charts use, so a running back is the same hue
-    everywhere in the app.
-
     Steps:
-        1. Look up the translucent tint for this position, falling back to the
-           neutral used for K and DST so an unrecognised position still renders.
-        2. Look up the solid hue with `position_color` above, for the border.
-        3. Build an inline span carrying both.
+        1. Look up the position's hue with `position_color` above, falling back
+           to the neutral for anything unrecognised.
+        2. Hand it to `badge_html` above.
 
     Args:
         position: A position name such as "RB".
 
     Returns:
         str: HTML for `st.markdown(..., unsafe_allow_html=True)`.
-
-    Note:
-        The BACKGROUND is the translucent tint and the TEXT colour is inherited,
-        which is what lets one badge work on both the light and dark surface with
-        no theme check. Filling it with the solid hue instead would need light
-        text on some positions and dark text on others — the light palette's
-        yellow and magenta both fall below 3:1 against white.
     """
-    tint = POSITION_TINTS.get(position, POSITION_TINTS["K"])
-    return (
-        f'<span style="display:inline-block;background:{tint};'
-        f'border:1px solid {position_color(position)};border-radius:4px;'
-        f'padding:0.05rem 0.45rem;font-size:0.8rem;font-weight:600;'
-        f'line-height:1.4">{html.escape(str(position))}</span>'
-    )
-
-
+    return badge_html(position, position_color(position))
 
 RANK_HUE = "#5a6b7a"
 """The one hue the strengths panel shades a rank with. A low-chroma slate, kept

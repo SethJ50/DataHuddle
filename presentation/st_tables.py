@@ -201,3 +201,98 @@ def color_scale(direction_by_column, blue="42, 120, 214", red="205, 66, 54",
         return styles
 
     return _style
+
+def diverging_wash(position, blue="42, 120, 214", red="205, 66, 54",
+                   max_alpha=0.45):
+    """Turn a 0-1 position into a translucent blue or red, or into nothing.
+
+    The shared colour rule behind both `color_scale` above and
+    `shade_by_percentile` below, so a cell painted from a league percentile and
+    one painted from its own column mean the same thing at the same intensity.
+
+    Args:
+        position: Where the value sits, 0 worst to 1 best. NaN gives no colour.
+        blue: The "good" hue as "r, g, b".
+        red: The "bad" hue as "r, g, b".
+        max_alpha: How strong the wash gets at the very ends.
+
+    Returns:
+        str: A CSS declaration, or "" for the middle of the range and for
+            missing values.
+    """
+    if position is None or pd.isna(position):
+        return ""
+    strength = abs(position - 0.5) * 2 * max_alpha
+    if strength < 0.02:
+        return ""
+    hue = blue if position > 0.5 else red
+    return f"background-color: rgba({hue}, {strength:.3f})"
+
+
+def shade_by_percentile(column, percentiles, **wash):
+    """Wash one column using a percentile supplied per row.
+
+    Used where the ranking comes from OUTSIDE the table -- a player's standing in
+    the league, rather than his standing among the rows on screen.
+
+    Steps:
+        1. Define an inner function pandas will call with the table.
+        2. Paint the named column from the percentiles, converting each from
+           0-100 to the 0-1 the wash expects.
+
+    Args:
+        column: Which column to paint.
+        percentiles: A 0-100 value per row, lined up with the table's index.
+        **wash: Passed through to `diverging_wash` above.
+
+    Returns:
+        A function suitable for `df.style.apply(fn, axis=None)`.
+    """
+    def _style(sub_df: pd.DataFrame) -> pd.DataFrame:
+        styles = pd.DataFrame("", index=sub_df.index, columns=sub_df.columns)
+        if column in sub_df.columns:
+            styles[column] = [diverging_wash(p / 100 if pd.notna(p) else p, **wash)
+                              for p in percentiles]
+        return styles
+
+    return _style
+
+
+def shade_cells(percentiles, **wash):
+    """Wash every cell of a table from a same-shaped grid of percentiles.
+
+    The cell-by-cell counterpart to `shade_by_percentile` above. A game log is
+    one row per week, and what makes a number worth noticing is how good that
+    week was compared with everybody else's -- which is a different percentile
+    per cell, not per column.
+
+    Steps:
+        1. Define an inner function pandas will call with the table.
+        2. Paint each column the grid has an entry for, converting each
+           percentile from 0-100 into the 0-1 the wash expects.
+
+    Args:
+        percentiles: A frame with the SAME index and columns as the table being
+            styled, holding 0-100 per cell. NaN leaves a cell unpainted, which is
+            what an unranked stat and an unmatched week both produce.
+        **wash: Passed through to `diverging_wash` above.
+
+    Returns:
+        A function suitable for `df.style.apply(fn, axis=None)`.
+
+    Note:
+        RANKED AGAINST THE LEAGUE, not against the rows on screen. Five rows are
+        far too few to rank within, and "his best week of these five" is a much
+        less useful thing to know than "a top-decile week for a receiver".
+    """
+    def _style(sub_df: pd.DataFrame) -> pd.DataFrame:
+        styles = pd.DataFrame("", index=sub_df.index, columns=sub_df.columns)
+        for column in sub_df.columns:
+            if column in percentiles.columns:
+                styles[column] = [
+                    diverging_wash(p / 100 if pd.notna(p) else p, **wash)
+                    for p in percentiles[column]
+                ]
+        return styles
+
+    return _style

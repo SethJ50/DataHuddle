@@ -436,3 +436,77 @@ def weekly_tendency_chart(frame, team, measure="proe", dark=None):
     )
 
     return (league + line + dots).properties(height=260)
+
+TREND_COLORS = ["#2a78d6", "#e07b39", "#00857a", "#b5539c", "#8a8f98"]
+"""Hues for the trend plot's series, in the order they are assigned.
+
+Deliberately NOT the position palette: a position badge sits directly above this
+plot, and one colour must not mean two things on the same screen.
+
+Five, because a narrow column cannot carry more lines than that legibly. Pick a
+sixth stat and the plot stops being readable well before it runs out of colours.
+"""
+
+
+def trend_chart(frame, dark=None):
+    """Plot how a player ranked against his position over recent weeks.
+
+    One line per stat, all on a percentile axis so they can share it. The
+    question it answers is "is he trending", which no table of raw numbers
+    answers at a glance.
+
+    Steps:
+        1. Draw a faint rule at the fiftieth percentile, so "better or worse than
+           a typical player at his position" is readable without counting
+           gridlines.
+        2. Draw one line per stat, with a point per week so a single-game series
+           is still visible.
+        3. Fix the axis to 0-100 and put the legend underneath, since the plot
+           sits in a narrow column.
+
+    Args:
+        frame: `weekly_percentiles`' output with a `label` column added, holding
+            the heading each stat should appear under in the legend.
+        dark: True for the dark theme's ink. None asks the theme.
+
+    Returns:
+        alt.LayerChart: Ready for `st.altair_chart(..., width="stretch",
+            theme=None)`.
+    """
+    import altair as alt
+    from presentation.charts import is_dark_theme
+
+    dark = is_dark_theme() if dark is None else dark
+    guide = "#6b7280" if dark else "#c8ccd2"
+
+    midline = (alt.Chart(frame)
+               .mark_rule(color=guide, strokeDash=[4, 4], strokeWidth=1)
+               .encode(y=alt.datum(50)))
+
+    lines = (
+        alt.Chart(frame)
+        .mark_line(point=True, strokeWidth=2)
+        .encode(
+            # `period` is the LABEL ("25W18") and `when` is the sortable number
+            # behind it. Both are needed: the window can cross a season boundary,
+            # so week alone would neither sort correctly nor read unambiguously.
+            #
+            # Nominal rather than ordinal, so only the weeks he played get a slot
+            # and the explicit sort decides their order -- most recent on the
+            # right.
+            x=alt.X("period:N", title=None,
+                    sort=alt.SortField(field="when", order="ascending")),
+            y=alt.Y("percentile:Q", title="Percentile at his position",
+                    scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("label:N", title=None,
+                            scale=alt.Scale(range=TREND_COLORS),
+                            legend=alt.Legend(orient="bottom", columns=1)),
+            tooltip=[alt.Tooltip("period:N", title="Week"),
+                     alt.Tooltip("label:N", title="Stat"),
+                     alt.Tooltip("value:Q", title="Value", format=".2f"),
+                     alt.Tooltip("percentile:Q", title="Percentile",
+                                 format=".0f")],
+        )
+    )
+
+    return (midline + lines).properties(height=260)
