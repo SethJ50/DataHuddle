@@ -1,8 +1,12 @@
 """Daily Fantasy page: one team's offence, and what their defense gives up.
 
-Two tabs, because there are two reasons to look a team up. You check their
-offence when deciding whether to buy its players, and you check their defense
-when deciding whether to buy the players facing it.
+Three tabs, because there are three reasons to look a team up. You check their
+OFFENSE when deciding whether to buy its players, their DEFENSE when deciding
+whether to buy the players facing it, and their PLAY CALLING when you want to
+know whether what the season averages say is still true this month.
+
+The crest and name sit across the top, the controls down the left third, and the
+tabs fill the remaining two thirds.
 
 Nearly every number here comes from a service built in an earlier phase; this
 page is mostly a matter of arranging them and putting each one next to the
@@ -16,9 +20,10 @@ it is changed.
 import numpy as np
 import streamlit as st
 
-from presentation.dfs_charts import weekly_tendency_chart
-from presentation.dfs_gamelog import ordinal
-from services.dfs_player_service import player_weeks, team_usage
+from presentation.dfs_charts import player_trend_chart, weekly_tendency_chart
+from presentation.dfs_gamelog import (FANTASY_RECEIVING, FANTASY_RUSHING,
+                                      OPPS_RECEIVING, OPPS_RUSHING, ordinal)
+from services.dfs_player_service import player_weeks, team_player_stats
 from services.dfs_scoring import DfsScoring
 from services.dfs_team_service import (
     defensive_allowances, implied_totals, league_ranks,
@@ -26,11 +31,10 @@ from services.dfs_team_service import (
 )
 from streamlit_state import get_app_context
 
+SITES = (DfsScoring.FANDUEL, DfsScoring.DRAFTKINGS)
+
 ctx = get_app_context()
 repo = ctx.dfs_read_repo
-
-st.title("Team Profile")
-st.caption("Daily Fantasy")
 
 
 @st.cache_data(show_spinner="Joining player data…")
@@ -48,26 +52,42 @@ if tendencies.empty:
     st.stop()
 
 seasons = sorted(repo.pbp()["season"].dropna().unique(), reverse=True)
-controls = st.columns([2, 2, 3, 2])
 
-with controls[1]:
+# The crest and name sit at the very top but need the team, which is chosen
+# further down. Reserving the row first is what lets both be true.
+header_slot = st.container()
+
+controls_col, content_col = st.columns([1, 2])
+
+with controls_col:
+    with st.container(border=True):
+        team_slot = st.container()
+        season_slot = st.container()
+        weeks_slot = st.container()
+        scoring_slot = st.container()
+
+# SEASON FIRST, even though it sits second on screen: the team list and the week
+# range are both drawn from whichever season is chosen.
+with season_slot:
     season = st.selectbox("Season", seasons, key="dfs_team_season")
-with controls[0]:
+
+with team_slot:
     teams = sorted(offensive_tendencies(repo, season)["team"].dropna().unique())
     team = st.selectbox("Team", teams, key="dfs_team_team")
-with controls[2]:
+
+with weeks_slot:
     weeks_available = repo.pbp().loc[repo.pbp()["season"] == season, "week"]
     first, last = int(weeks_available.min()), int(weeks_available.max())
     weeks = (st.slider("Weeks", first, last, (first, last),
                        key=f"dfs_team_weeks_{season}")
              if last > first else (first, last))
-with controls[3]:
+
+with scoring_slot:
     scoring = st.segmented_control(
-        "Scoring", list(DfsScoring),
-        default=DfsScoring.FANDUEL, key="dfs_team_scoring", required=True,
-        label_visibility="collapsed",
+        "Site", SITES, default=DfsScoring.FANDUEL,
+        key="dfs_team_scoring", required=True,
     )
-    scoring = scoring if scoring in tuple(DfsScoring) else DfsScoring.FANDUEL
+    scoring = scoring if scoring in SITES else DfsScoring.FANDUEL
 
 # ---------------------------------------------------------------------------
 # Header: who this is
@@ -75,14 +95,18 @@ with controls[3]:
 reference = repo.teams()
 badge = reference[reference["team_abbr"] == team]
 
-crest, title = st.columns([1, 11])
-with crest:
-    if not badge.empty and badge["team_logo_espn"].notna().any():
-        st.image(badge["team_logo_espn"].iloc[0], width=64)
-with title:
-    st.subheader(badge["team_name"].iloc[0] if not badge.empty else team)
+with header_slot:
+    crest, title = st.columns([1, 11], vertical_alignment="center")
+    with crest:
+        if not badge.empty and badge["team_logo_espn"].notna().any():
+            st.image(badge["team_logo_espn"].iloc[0], width=64)
+    with title:
+        st.subheader(badge["team_name"].iloc[0] if not badge.empty else team)
 
-offence_tab, defense_tab = st.tabs(["Offence", "Defense"])
+with content_col:
+    with st.container(border=True):
+        offence_tab, defense_tab, playcalling_tab = st.tabs(
+            ["Offense", "Defense", "Play Calling"])
 
 
 def strip(figures):
@@ -161,60 +185,21 @@ with offence_tab:
         ])
         st.caption(f"Neutral script means {neutral_script_description()}.")
 
-        st.divider()
-        st.markdown("**Who gets the ball**")
-        usage = team_usage(load_players(scoring), team, season, weeks)
 
-        if usage.empty:
-            st.caption("No players recorded for this team in these weeks.")
-        else:
-            st.dataframe(
-                usage, hide_index=True, width="stretch", height=430,
-                column_config={
-                    "name": st.column_config.TextColumn("Player", width=170),
-                    "position": st.column_config.TextColumn("Pos", width=55),
-                    "games": st.column_config.NumberColumn("G", width=45, format="%d"),
-                    "snap_share": st.column_config.NumberColumn(
-                        "Snap%", format="percent",
-                        help="Share of the offence's snaps, averaged over his games."),
-                    "targets": st.column_config.NumberColumn("Tgt", format="%d"),
-                    "target_share": st.column_config.NumberColumn(
-                        "Tgt%", format="percent",
-                        help="His share of the team's targets over these weeks."),
-                    "carries": st.column_config.NumberColumn("Car", format="%d"),
-                    "carry_share": st.column_config.NumberColumn(
-                        "Car%", format="percent"),
-                    "red_zone_touches": st.column_config.NumberColumn(
-                        "RZ", format="%d"),
-                    "red_zone_share": st.column_config.NumberColumn(
-                        "RZ%", format="percent",
-                        help="His share of the team's work inside the twenty, "
-                             "which is where touchdowns come from."),
-                    "air_yards": st.column_config.NumberColumn(
-                        "aDOT", format="%.1f",
-                        help="Average depth of target. Blank for players the "
-                             "tracking data does not cover."),
-                    "points_per_game": st.column_config.NumberColumn(
-                        "FP/g", format="%.1f"),
-                    "expected_points_per_game": st.column_config.NumberColumn(
-                        "xFP/g", format="%.1f"),
-                },
-            )
-            st.caption("Shares are of the team's totals over the weeks "
-                       "selected, not an average of the weekly shares — a "
-                       "player who saw 40% of the targets in his only game did "
-                       "not command 40% of the offence.")
-
-        st.divider()
-        st.markdown("**Play-calling week by week**")
-        trend = weekly_tendencies(repo, season, weeks)
-        if trend.empty:
-            st.caption("Not enough neutral plays to plot.")
-        else:
-            st.altair_chart(weekly_tendency_chart(trend, team, "proe"),
-                            width="stretch", theme=None)
-            st.caption("The solid line is this team; the dashed one is the "
-                       "league average that week. A gap is a bye.")
+# ---------------------------------------------------------------------------
+# Play calling
+# ---------------------------------------------------------------------------
+with playcalling_tab:
+    st.markdown("**Play-calling week by week**")
+    trend = weekly_tendencies(repo, season, weeks)
+    if trend.empty:
+        st.caption("Not enough neutral plays to plot.")
+    else:
+        st.altair_chart(weekly_tendency_chart(trend, team, "proe"),
+                        width="stretch", theme=None)
+        st.caption("The solid line is this team; the dashed one is the "
+                   "league average that week. A gap is a bye.")
+        st.caption(f"Neutral script means {neutral_script_description()}.")
 
 # ---------------------------------------------------------------------------
 # Defense
@@ -257,3 +242,142 @@ with defense_tab:
              None, None, None),
         ])
         st.divider()
+
+
+# ---------------------------------------------------------------------------
+# Who does what: the same numbers per player, and how they moved
+# ---------------------------------------------------------------------------
+# The two halves of the offence, each pairing what a player DID with how much of
+# the offence ran through him -- the Fantasy and Opportunities categories of the
+# player profile's game log, so a stat means the same thing on both pages.
+SIDES = {
+    "Rushing": {
+        "columns": FANTASY_RUSHING + OPPS_RUSHING,
+        # Nobody else carries the ball on purpose. A tight end with one end-around
+        # all season is noise in a table about who gets the carries.
+        "positions": ("QB", "RB", "WR"),
+        "volume": "carries",
+    },
+    "Receiving": {
+        "columns": FANTASY_RECEIVING + OPPS_RECEIVING,
+        # Quarterbacks are left out: their receiving line is a trick play.
+        "positions": ("RB", "WR", "TE"),
+        "volume": "targets",
+    },
+}
+
+# Every stat either side can show, deduplicated -- several appear in both
+# categories and are the same column each time.
+PLOTTABLE = {}
+for _side in SIDES.values():
+    for _column in _side["columns"]:
+        PLOTTABLE.setdefault(_column.field, _column.label)
+
+SIDE_KEY = "dfs_team_side"
+
+players = load_players(scoring)
+
+tables_col, plot_col = st.columns([2, 1])
+
+with tables_col:
+    with st.container(border=True):
+        # KEYED, and rerunning on change. Streamlit switches tabs in the browser
+        # without re-running the script by default, so the plot beside them would go
+        # on showing the previous tab's stat until something else forced a rerun.
+        side_tabs = st.tabs(list(SIDES), key=SIDE_KEY, on_change="rerun")
+
+        for side_tab, (side, spec) in zip(side_tabs, SIDES.items()):
+            with side_tab:
+                columns = spec["columns"]
+
+                # Computed over the WHOLE team, then filtered. A share is a share of
+                # the team's total, so narrowing the rows first would rebase it on
+                # the handful of players left and make every number too big.
+                stats = team_player_stats(players, team,
+                                        [column.field for column in columns],
+                                        season, weeks)
+                if not stats.empty:
+                    stats = stats[stats["position"].isin(spec["positions"])
+                                & (stats[spec["volume"]].fillna(0) > 0)]
+                    # By the tab's own headline number rather than by snaps, so the
+                    # players the tab is ABOUT come first -- a receiver with one
+                    # end-around should not head a table of carries.
+                    stats = stats.sort_values(spec["volume"], ascending=False)
+
+                if stats.empty:
+                    st.caption("No players recorded for this team in these weeks.")
+                    continue
+
+                # A share arrives as a FRACTION and its format carries a per-cent
+                # sign, so it has to be multiplied out before drawing -- 0.61
+                # through "%.0f%%" renders as "1%", and anything under half a
+                # per cent as "0%". The same step `shape` in
+                # presentation/dfs_gamelog.py takes before it draws a game log.
+                for column in columns:
+                    if column.scale != 1.0 and column.field in stats.columns:
+                        stats[column.field] = stats[column.field] * column.scale
+
+                st.dataframe(
+                    stats, hide_index=True, width="stretch", height=430,
+                    column_config={
+                        "name": st.column_config.TextColumn("Player", width=150),
+                        "position": st.column_config.TextColumn("Pos", width=50),
+                        "games": st.column_config.NumberColumn("G", width=45,
+                                                            format="%d"),
+                        **{column.field: st.column_config.NumberColumn(
+                            column.label, format=column.format,
+                            help=column.help or None, width=column.width)
+                        for column in columns},
+                    },
+                )
+
+        st.caption("Counts are PER GAME, so a player who missed half the range is "
+                "still comparable. Shares are his total over the team's total "
+                "over the same weeks — never an average of the weekly shares.")
+
+# Which tab is showing. `st.tabs` records it under its key; falling back to
+# the first side covers the very first render, before anything is stored.
+open_side = st.session_state.get(SIDE_KEY) or next(iter(SIDES))
+if open_side not in SIDES:
+    open_side = next(iter(SIDES))
+
+with plot_col:
+    with st.container(border=True):
+        st.markdown(f"**Week by week** — {open_side.lower()}")
+
+        roster = team_player_stats(players, team, ["carries"], season, weeks)
+        names = list(roster["name"])
+
+        picked = st.multiselect(
+            "Players", names,
+            # The three busiest, since team_player_stats orders by snaps. A plot
+            # that starts empty asks for a click before it says anything.
+            default=names[:3], key=f"dfs_team_plot_players_{team}_{season}",
+        )
+        # Whichever tab is open decides which stat the plot opens on -- carries
+        # beside the rushing table, targets beside the receiving one.
+        #
+        # The KEY carries the side, which is what makes the default reapply: a
+        # Streamlit widget ignores its default once its key has a stored value, so
+        # sharing one key between the two sides would strand you on whichever stat
+        # you last chose.
+        options = list(PLOTTABLE)
+        stat = st.selectbox("Stat", options,
+                            index=options.index(SIDES[open_side]["volume"]),
+                            format_func=lambda field: PLOTTABLE[field],
+                            key=f"dfs_team_plot_stat_{open_side}")
+
+        first, last = weeks
+        lines = players[(players["team"] == team)
+                        & (players["season"] == season)
+                        & (players["week"].between(first, last))
+                        & (players["name"].isin(picked))]
+
+        if not picked:
+            st.caption("Pick a player to plot.")
+        elif stat not in lines.columns or lines[stat].notna().sum() == 0:
+            st.caption("Nothing recorded for that stat in these weeks.")
+        else:
+            drawn = lines[["name", "week", stat]].rename(columns={stat: "value"})
+            st.altair_chart(player_trend_chart(drawn, PLOTTABLE[stat]),
+                            width="stretch", theme=None)

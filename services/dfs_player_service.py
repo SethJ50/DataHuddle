@@ -973,3 +973,120 @@ def window_summary(frame, canonical_id, fields, season, week, games=5,
     # average and no better end (see UNRANKED in presentation/dfs_gamelog.py).
     summary = pd.DataFrame(rows)
     return summary[summary["average"].notna()].reset_index(drop=True)
+
+SHARE_SOURCES = {
+    "carry_share": "carries",
+    "target_share": "targets",
+    "red_zone_carry_share": "red_zone_carries",
+    "red_zone_target_share": "red_zone_targets",
+    "inside_5_carry_share": "inside_5_carries",
+    "inside_5_target_share": "inside_5_targets",
+    "goal_line_carry_share": "goal_line_carries",
+    "end_zone_target_share": "end_zone_targets",
+    "air_yards_share": "receiving_air_yards",
+}
+"""Which count each share is a share OF.
+
+Needed because a share over several weeks is not the average of the weekly ones.
+A player who saw 40% of the targets in his only game did not command 40% of the
+offence, and averaging his weekly shares says he did. Dividing his total by the
+team's total over the same stretch says what actually happened.
+
+A share with no entry here -- `snap_share`, or Next Gen's own air-yards share --
+is averaged instead, because there is no count that sums to a team total. Eleven
+players are on the field for every snap, so snap shares do not add up to one.
+"""
+
+AVERAGED = frozenset({"snap_share", "percent_share_of_intended_air_yards",
+                      "wopr", "completion_pct"})
+"""Rates with no total to rebuild them from, so a plain average is the best
+available answer."""
+
+
+def team_player_stats(frame, team, fields, season=None, weeks=None):
+    """Summarise every player on one team over a stretch of weeks.
+
+    The team-level counterpart to a game log: instead of one player across many
+    weeks, this is many players across one range. Built for comparing team-mates
+    -- who is getting the carries, who is getting the targets near the goal line.
+
+    Steps:
+        1. Narrow to the team, the season and the week range.
+        2. Count how many games each player actually appeared in.
+        3. Turn each requested field into one number per player: a share is
+           rebuilt from totals, a rate is averaged, and everything else becomes a
+           per-game figure. See the note, because the three are not
+           interchangeable.
+        4. Sort by snaps, so the players worth looking at come first.
+
+    Args:
+        frame: The table from `player_weeks`.
+        team: Which team, as an abbreviation such as `"SEA"`.
+        fields: Which columns to summarise, as column names.
+        season: Which season, or None for every season in the frame.
+        weeks: A `(first, last)` pair, both included, or None for all of them.
+
+    Returns:
+        pd.DataFrame: One row per player, with `name`, `position`, `games` and
+            one column per requested field. Empty with `name`, `position` and
+            `games` if the team has no rows in the range.
+
+    Note:
+        THREE DIFFERENT AGGREGATIONS, decided per field:
+
+          * a SHARE listed in SHARE_SOURCES is his total over the team's total,
+            never an average of the weekly shares
+          * a RATE listed in AVERAGED is averaged, because nothing sums to a
+            team total it could be rebuilt from
+          * everything else is PER GAME, so a player who missed half the range
+            is still comparable with one who played it all
+
+        Getting the first of those wrong is the trap `team_usage` above already
+        documents, and it flatters exactly the players you are trying to avoid.
+    """
+    base = ["name", "position", "games"]
+
+    rows = frame[frame["team"] == team]
+    if season is not None:
+        rows = rows[rows["season"] == season]
+    if weeks is not None:
+        first, last = weeks
+        rows = rows[rows["week"].between(first, last)]
+
+    # DEDUPLICATED, order preserved. A caller pairs two categories that both
+    # declare `carries` or `targets` -- the same column, asked for twice -- and
+    # selecting a repeated name at the end hands back the column twice, which
+    # then collides in the caller's column_config.
+    present = list(dict.fromkeys(field for field in fields
+                                 if field in rows.columns))
+    if rows.empty or not present:
+        return pd.DataFrame(columns=base + list(dict.fromkeys(fields)))
+
+    # Every count needed, including the ones only wanted as a share's
+    # denominator.
+    needed = set(present) | {SHARE_SOURCES[f] for f in present
+                             if f in SHARE_SOURCES and SHARE_SOURCES[f] in rows.columns}
+    numeric = [field for field in needed if field in rows.columns]
+
+    grouped = rows.groupby(["canonical_id", "name", "position"], as_index=False)
+    totals = grouped[numeric].sum(numeric_only=True)
+    means = grouped[numeric].mean(numeric_only=True)
+    games = grouped.agg(games=("week", "nunique"))
+    snaps = grouped.agg(snaps=("offense_snaps", "sum"))
+
+    out = games.merge(snaps, on=["canonical_id", "name", "position"])
+
+    for field in present:
+        if field in SHARE_SOURCES and SHARE_SOURCES[field] in totals.columns:
+            count = SHARE_SOURCES[field]
+            team_total = totals[count].sum()
+            out[field] = (totals[count] / team_total if team_total
+                          else float("nan"))
+        elif field in AVERAGED:
+            out[field] = means[field]
+        else:
+            out[field] = totals[field] / out["games"].replace(0, float("nan"))
+
+    out = out.sort_values("snaps", ascending=False)
+    return out[base + present].reset_index(drop=True)
+

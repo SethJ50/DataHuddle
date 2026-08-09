@@ -510,3 +510,49 @@ def trend_chart(frame, dark=None):
     )
 
     return (midline + lines).properties(height=260)
+
+
+def player_trend_chart(frame, title, dark=None):
+    """Plot one statistic for several team-mates, week by week.
+
+    Answers the question a usage table cannot: not "who got more" but "when did
+    that change". A back taking over a backfield and a receiver losing his role
+    both look like a single number in a table and like an obvious crossing here.
+
+    Steps:
+        1. Draw one line per player, with a point per week so a player who
+           appeared once is still visible.
+        2. Label the axis with the statistic being plotted, since it changes.
+        3. Put the legend underneath, because the plot sits in a narrow column.
+
+    Args:
+        frame: Long format, with `week`, `name` and `value`.
+        title: What the Y axis is showing, such as "Carries".
+        dark: True for the dark theme's ink. None asks the theme.
+
+    Returns:
+        alt.Chart: Ready for `st.altair_chart(..., width="stretch",
+            theme=None)`.
+
+    Note:
+        RAW VALUES, not percentiles. Every line is the same statistic, so the
+        units already agree and normalising would only put distance between the
+        plot and the table beside it.
+    """
+    import altair as alt
+
+    return (
+        alt.Chart(frame)
+        .mark_line(point=True, strokeWidth=2)
+        .encode(
+            x=alt.X("week:O", title=None),
+            y=alt.Y("value:Q", title=title),
+            color=alt.Color("name:N", title=None,
+                            scale=alt.Scale(range=TREND_COLORS),
+                            legend=alt.Legend(orient="bottom", columns=1)),
+            tooltip=[alt.Tooltip("name:N", title="Player"),
+                     alt.Tooltip("week:O", title="Week"),
+                     alt.Tooltip("value:Q", title=title, format=".2f")],
+        )
+        .properties(height=300)
+    )
