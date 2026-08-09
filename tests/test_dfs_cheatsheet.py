@@ -15,8 +15,9 @@ import pandas as pd
 import pytest
 
 from presentation.dfs_cheatsheet import (
-    DEFAULT_COLUMNS, GROUPS, IDENTITY, SLATE_DEFAULTS, SLATE_GROUP, build,
-    columns_by_field, every_column,
+    DEFAULT_COLUMNS, GROUPS, IDENTITY, POSITION_FILTERS, SLATE_GROUP,
+    SLATE_ONLY_GROUPS, build, columns_by_field, every_column,
+    position_defaults,
 )
 from services.dfs_player_service import slate
 
@@ -63,11 +64,36 @@ def test_only_fraction_columns_carry_a_scale():
     # The sources disagree: `snap_share` arrives as a fraction, `aggressiveness`
     # arrives already multiplied out. Scaling the wrong one turns 40.6% into
     # 4062%.
+    #
+    # Asserted as a RULE rather than a list, so adding a share does not mean
+    # editing this test -- which is how the list version would rot into being
+    # updated to match whatever the code does.
     scaled = {column.field for column in every_column() if column.scale != 1.0}
-    assert scaled == {"snap_share", "target_share", "air_yards_share",
-                      "receiving_drop_pct",
-                      # The slate's trailing-form versions of the same two.
-                      "form_snap_share", "form_target_share"}
+    assert all(field.endswith(("_share", "_pct")) for field in scaled), scaled
+
+    # The three that arrive ALREADY multiplied. None may carry a scale, under
+    # its own name or its trailing-form one.
+    already_multiplied = {"aggressiveness",
+                          "percent_attempts_gte_eight_defenders",
+                          "percent_share_of_intended_air_yards"}
+    for field in already_multiplied:
+        assert not (scaled & {field, f"form_{field}"}), field
+
+
+def test_leaf_labels_are_unique_within_a_displayed_set():
+    # The table carries two-level headings, and Streamlit names such a column
+    # after the LEAF -- which is also what column_config is keyed on. Two columns
+    # sharing a leaf would therefore share one config, so the second one's format
+    # and tooltip would silently be the first one's.
+    #
+    # Only within a set: a slate and a played week are never shown together.
+    for is_slate in (True, False):
+        labels = [column.label
+                  for name, group in GROUPS.items()
+                  if (name in SLATE_ONLY_GROUPS) == is_slate
+                  for column in group]
+        repeated = {label for label in labels if labels.count(label) > 1}
+        assert not repeated, ("slate" if is_slate else "played", repeated)
 
 
 def test_the_groups_are_not_empty():
@@ -91,7 +117,7 @@ def frame_of(**columns):
 def test_identity_columns_come_first_and_are_never_optional():
     table, columns = build(frame_of(total_fantasy_points=[12.0]),
                            ["total_fantasy_points"])
-    assert list(table.columns)[:4] == ["name", "position", "team", "opponent"]
+    assert [leaf for _, leaf in table.columns][:4] == ["Player", "Pos", "Team", "Opp"]
 
 
 def test_columns_appear_in_catalogue_order_not_tick_order():
@@ -99,34 +125,34 @@ def test_columns_appear_in_catalogue_order_not_tick_order():
     frame = frame_of(total_fantasy_points=[12.0], targets=[8], snap_share=[0.9])
     table, _ = build(frame, ["targets", "snap_share", "total_fantasy_points"])
 
-    order = [c.field for c in every_column() if c.field in
+    order = [c.label for c in every_column() if c.field in
              {"targets", "snap_share", "total_fantasy_points"}]
-    assert list(table.columns)[4:] == order
+    assert [leaf for _, leaf in table.columns][4:] == order
 
 
 def test_a_fraction_is_turned_into_a_percentage():
     table, _ = build(frame_of(snap_share=[0.85]), ["snap_share"])
-    assert table["snap_share"].iloc[0] == pytest.approx(85.0)
+    assert table[("Volume", "Snap%")].iloc[0] == pytest.approx(85.0)
 
 
 def test_an_already_multiplied_column_is_left_alone():
     # The trap the scale field exists for.
     table, _ = build(frame_of(avg_intended_air_yards=[11.4]),
                      ["avg_intended_air_yards"])
-    assert table["avg_intended_air_yards"].iloc[0] == pytest.approx(11.4)
+    assert table[("Tracking", "aDOT")].iloc[0] == pytest.approx(11.4)
 
 
 def test_a_column_the_data_does_not_have_is_skipped():
     # A source can be unavailable for a season, and its columns go with it.
     table, columns = build(frame_of(total_fantasy_points=[12.0]),
                            ["total_fantasy_points", "avg_separation"])
-    assert "avg_separation" not in table.columns
+    assert "Sep" not in [leaf for _, leaf in table.columns]
     assert "avg_separation" not in {c.field for c in columns}
 
 
 def test_choosing_nothing_still_leaves_the_identity_columns():
     table, _ = build(frame_of(total_fantasy_points=[12.0]), [])
-    assert list(table.columns) == ["name", "position", "team", "opponent"]
+    assert [leaf for _, leaf in table.columns] == ["Player", "Pos", "Team", "Opp"]
 
 
 def test_the_source_frame_is_not_edited():
@@ -202,12 +228,16 @@ def test_an_empty_slate_still_carries_the_gap_column():
     assert "points_gap" in empty.columns
 
 
-def test_the_slate_defaults_are_real_slate_columns():
-    # A default naming a column outside the slate group would show nothing when
-    # a slate is loaded, and the page would look like it ignored the setting.
-    slate_fields = {column.field for column in GROUPS[SLATE_GROUP]}
-    assert set(SLATE_DEFAULTS) <= slate_fields
+def test_every_position_default_is_a_real_slate_column():
+    # A default naming a column outside the slate half would show nothing when a
+    # slate is loaded, and the page would look like it ignored the setting.
+    slate_fields = {column.field
+                    for name, group in GROUPS.items()
+                    if name in SLATE_ONLY_GROUPS
+                    for column in group}
+    for position in POSITION_FILTERS:
+        assert set(position_defaults(position)) <= slate_fields, position
 
 
 def test_the_slate_default_set_is_also_short():
-    assert len(SLATE_DEFAULTS) <= 8
+    assert len(position_defaults("RB")) <= 24

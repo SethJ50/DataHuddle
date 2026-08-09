@@ -53,8 +53,22 @@ class FakeRepo:
         return self._get("crosswalk", ["pfr_player_id", "canonical_id"])
 
     def pbp(self):
-        return self._get("pbp", ["yardline_100", "season", "week", "play_id",
-                                 "rusher_player_id", "receiver_player_id"])
+        plays = self._get("pbp", ["yardline_100", "season", "week", "play_id",
+                                  "rusher_player_id", "receiver_player_id",
+                                  "goal_to_go", "air_yards"])
+
+        # A fixture states only the fields its own test is about, but the
+        # opportunity counts read four slices of the play-by-play. Filling in
+        # whatever is absent keeps every existing fixture valid instead of making
+        # each of them list every column the counter happens to touch.
+        #
+        # The defaults are the "did not happen" values: no goal-to-go snaps, and
+        # no recorded air yards -- which compares as False, so no end-zone
+        # targets either.
+        for column, default in (("goal_to_go", 0), ("air_yards", float("nan"))):
+            if column not in plays.columns:
+                plays = plays.assign(**{column: default})
+        return plays
 
 
 def box_score(rows):

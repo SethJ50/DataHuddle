@@ -216,20 +216,21 @@ def recent_history(player_weeks, season, week, games=10) -> pd.DataFrame:
 
     return points.join(notes).reset_index()
 
+def opponent_defence_rates(repo, season, week, games, scoring) -> pd.DataFrame:
+    """Measure what every defence has been giving up lately, running and passing.
 
-def opponent_defence_ranks(repo, season, week, games, scoring) -> pd.DataFrame:
-    """Rank every defence on what it has allowed lately, running and passing.
-
-    A player's matchup, as two numbers. The columns exist so a cheap receiver
-    facing the league's most generous secondary can be told apart from an
-    identical one facing its stingiest.
+    A player's matchup, as four numbers. They exist so a cheap receiver facing
+    the league's most generous secondary can be told apart from an identical one
+    facing its stingiest -- and as RATES rather than ranks, so you can see
+    whether the gap between first and tenth is a chasm or a rounding error.
 
     Steps:
         1. Work out which stretch of weeks the form window covers, using
            `_window_before` below -- the same stretch the player figures use.
         2. Ask `defensive_allowances` from services/dfs_team_service.py what each
            defence gave up over it, once for the run and once for the pass.
-        3. Rank each, smallest first, since a defence that allows less is better.
+        3. Keep both numbers it returns per side: the fantasy points allowed per
+           play, and the expected points added against it per play.
 
     Args:
         repo: A `DfsReadRepo`.
@@ -239,42 +240,116 @@ def opponent_defence_ranks(repo, season, week, games, scoring) -> pd.DataFrame:
         scoring: Which scoring the allowances are measured in.
 
     Returns:
-        pd.DataFrame: `opponent`, `def_rank_rush` and `def_rank_pass`, ranked so
-            1 is the stingiest. Empty if the window holds no games.
+        pd.DataFrame: `opponent`, `def_fpts_per_rush`, `def_epa_per_rush`,
+            `def_fpts_per_pass` and `def_epa_per_pass`. Empty with those columns
+            if the window holds no games.
 
     Note:
+        HIGHER IS BETTER FOR THE PLAYER, on all four. A defence that allows more
+        fantasy points per play is a defence you want to attack, and one that
+        allows more expected points per play is one that is playing badly. That
+        is the opposite of the ranks these replaced, where 1 meant stingiest --
+        so the columns cannot simply be swapped in a sort without noticing.
+
         MEASURED OVER THE SAME WINDOW AS THE PLAYER FIGURES, so everything on a
-        row describes one stretch of time. That was a deliberate choice over a
-        full-season rank, and it costs something: a five-week defensive sample is
-        small, so these ranks move about far more than season-long ones would.
-        Read them as a rough steer rather than a fine distinction.
+        row describes one stretch of time. That costs something: a five-week
+        defensive sample is small, so these move about far more than season-long
+        numbers would. Read them as a steer rather than a fine distinction.
+
+        THE TWO HALVES DISAGREE USEFULLY. Expected points says how WELL a
+        defence plays; fantasy points says how much it PAYS OUT. A sound defence
+        that is on the field constantly bleeds fantasy points anyway, and those
+        disagreements are the ones worth finding.
     """
-    from services.dfs_team_service import defensive_allowances, league_ranks
+    from services.dfs_team_service import defensive_allowances
+
+    columns = ["opponent", "def_fpts_per_rush", "def_epa_per_rush",
+               "def_fpts_per_pass", "def_epa_per_pass"]
 
     window_season, weeks = _window_before(repo, season, week, games)
     if weeks is None:
-        return pd.DataFrame(columns=["opponent", "def_rank_rush",
-                                     "def_rank_pass"])
+        return pd.DataFrame(columns=columns)
 
-    ranked = {}
-    for kind, positions, label in (("rush", ["RB"], "def_rank_rush"),
-                                   ("pass", ["WR", "TE"], "def_rank_pass")):
+    rates = None
+    for kind, positions, suffix in (("rush", ["RB"], "rush"),
+                                    ("pass", ["WR", "TE"], "pass")):
         allowed = defensive_allowances(repo, window_season, weeks,
                                        positions=positions, play_kind=kind,
                                        scoring=scoring)
         if allowed.empty:
             continue
-        allowed = league_ranks(allowed, ["points_per_play"],
-                               lower_is_better=("points_per_play",))
-        ranked[label] = allowed.set_index("team")["points_per_play_rank"]
 
-    if not ranked:
-        return pd.DataFrame(columns=["opponent", "def_rank_rush",
-                                     "def_rank_pass"])
+        side = allowed[["team", "points_per_play", "epa_per_play"]].rename(
+            columns={"team": "opponent",
+                     "points_per_play": f"def_fpts_per_{suffix}",
+                     "epa_per_play": f"def_epa_per_{suffix}"})
 
-    table = pd.DataFrame(ranked).reset_index()
-    return table.rename(columns={"index": "opponent", "team": "opponent"})
+        rates = side if rates is None else rates.merge(side, on="opponent",
+                                                       how="outer")
 
+    return pd.DataFrame(columns=columns) if rates is None else rates
+
+def vegas_lines(repo, season, week) -> pd.DataFrame:
+    """Get this week's betting total and spread, one row per team.
+
+    The market's view of how much scoring a game will hold, which is the single
+    best cheap signal for a slate: a 51-point game feeds more fantasy points to
+    everybody in it than a 37-point one, whoever wins.
+
+    Steps:
+        1. Read the schedule and keep the one week being looked at.
+        2. Give up quietly if the schedule carries no lines for it, which is
+           normal for a week too far ahead for the books to have posted.
+        3. Write each game out twice, once from each team's point of view, so a
+           player's row can be matched on his own team.
+        4. Flip the spread's sign for the home team, so the number reads the way
+           a sportsbook writes it -- see the note.
+        5. Split the total between the two sides, giving the favourite the
+           larger share.
+
+    Args:
+        repo: A `DfsReadRepo`, for the schedule.
+        season: The slate's season.
+        week: The slate's week.
+
+    Returns:
+        pd.DataFrame: `team`, `game_total` and `game_spread`. Two rows per game.
+            Empty when the schedule has no lines for that week, which the caller
+            treats as "no columns" rather than as an error.
+
+    Note:
+        THE SIGN IS FLIPPED ON PURPOSE. nflreadpy writes `spread_line` from the
+        HOME team's point of view and makes it POSITIVE when they are favoured.
+        A sportsbook writes the opposite -- a favourite is listed at -3.5,
+        because they give the points away. This returns the sportsbook's
+        convention, so NEGATIVE means favoured, and the number matches whatever
+        you are looking at in another tab.
+
+        Getting this backwards swaps every favourite for its underdog and still
+        looks entirely plausible, which is why it is spelled out here.
+    """
+    schedule = repo.schedules()
+    fixtures = schedule[(schedule["season"] == season)
+                        & (schedule["week"] == week)]
+
+    needed = {"home_team", "away_team", "spread_line", "total_line"}
+    if fixtures.empty or not needed <= set(fixtures.columns):
+        return pd.DataFrame(columns=["team", "game_total", "game_spread"])
+
+    fixtures = fixtures.dropna(subset=["total_line", "spread_line"])
+
+    sides = pd.concat([
+        pd.DataFrame({"team": fixtures["home_team"],
+                      "game_total": fixtures["total_line"],
+                      "game_spread": -fixtures["spread_line"]}),
+        pd.DataFrame({"team": fixtures["away_team"],
+                      "game_total": fixtures["total_line"],
+                      "game_spread": fixtures["spread_line"]}),
+    ])
+
+    sides["implied_total"] = sides["game_total"] / 2 - sides["game_spread"] / 2
+
+    return sides.reset_index(drop=True)
 
 def _window_before(repo, season, week, games):
     """Find the stretch of weeks the form window covers.
@@ -390,9 +465,26 @@ def slate_board(salaries, player_weeks, season, week, site,
                             on="_join", how="left")
 
     if repo is not None:
-        ranks = opponent_defence_ranks(repo, season, week, games, scoring)
-        if not ranks.empty:
-            board = board.merge(ranks, on="opponent", how="left")
+        rates = opponent_defence_rates(repo, season, week, games, scoring)
+        if not rates.empty:
+            board = board.merge(rates, on="opponent", how="left")
+
+        # Joined on the player's OWN team, unlike the defence ranks above which
+        # describe his opponent. Not a `form_` column: this is THIS WEEK'S
+        # fixture, not an average of past ones.
+        lines = vegas_lines(repo, season, week)
+        if not lines.empty:
+            board = board.merge(lines, on="team", how="left")
+
+            # The SAME frame joined a second time, on the opponent instead. A
+            # defence scores by holding the other offence down, so the implied
+            # total that matters to a DST is the one it plays AGAINST -- joined
+            # on the player's own team it would be the offence sharing his
+            # sideline, which is the opposite of what you would sort on.
+            opposing = lines.rename(columns={"team": "opponent",
+                                             "implied_total": "opp_implied_total"})
+            board = board.merge(opposing[["opponent", "opp_implied_total"]],
+                                on="opponent", how="left")
 
     board = board.drop(columns=["_join"])
 

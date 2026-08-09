@@ -122,16 +122,55 @@ def player_weeks(repo, scoring=DfsScoring.FANDUEL) -> pd.DataFrame:
         frame = _join_optional(frame, _resolved(repo.pfr_advstats(kind), crosswalk),
                                columns, key="canonical_id")
 
-    frame = frame.merge(_red_zone_touches(repo),
+    frame = frame.merge(_opportunity_counts(repo),
                         on=["canonical_id", "season", "week"], how="left")
-    frame = frame.merge(_goal_line_carries(repo),
-                        on=["canonical_id", "season", "week"], how="left")
-    frame["inside_5_carries"] = frame["inside_5_carries"].fillna(0).astype(int)
 
-    # Every row here is a player who APPEARED, so having no red-zone row means
-    # he got none rather than that nobody counted. Zero is the truthful answer
-    # and a blank would read as missing data.
-    frame["red_zone_touches"] = frame["red_zone_touches"].fillna(0).astype(int)
+    # Every row here is a player who APPEARED, so having no row in the counts
+    # means he got none rather than that nobody counted. Zero is the truthful
+    # answer and a blank would read as missing data.
+    OPPORTUNITY_COUNTS = ["red_zone_carries", "red_zone_targets",
+                          "red_zone_touches", "inside_5_carries",
+                          "inside_5_targets", "goal_line_carries",
+                          "end_zone_targets"]
+    frame[OPPORTUNITY_COUNTS] = frame[OPPORTUNITY_COUNTS].fillna(0).astype(int)
+
+    # Share of the team's total for each, using the same helper as carry_share.
+    OPPORTUNITY_SHARES = {
+        "red_zone_carries":  "red_zone_carry_share",
+        "red_zone_targets":  "red_zone_target_share",
+        "inside_5_carries":  "inside_5_carry_share",
+        "inside_5_targets":  "inside_5_target_share",
+        "goal_line_carries": "goal_line_carry_share",
+        "end_zone_targets":  "end_zone_target_share",
+    }
+    for count, share in OPPORTUNITY_SHARES.items():
+        frame[share] = _team_share(frame, count)
+
+    # --- derived measures ---------------------------------------------------
+    # Computed here rather than in the Cheat Sheet so the trailing-form averages
+    # pick them up automatically -- `_average_everything` prefixes every numeric
+    # column with `form_`, so each of these gets a per-game version for free.
+    #
+    # EACH IS GUARDED ON ITS INPUTS. The box-score selection above keeps whatever
+    # columns the season actually has, so a source that went missing for a year
+    # simply is not there -- and deriving from an absent column would take the
+    # whole page down rather than costing it one column. Missing here means the
+    # derived column is absent too, which every consumer already tolerates.
+    if {"completions", "attempts"} <= set(frame.columns):
+        frame["completion_pct"] = _safe_ratio(frame["completions"],
+                                              frame["attempts"])
+
+    # Adjusted opportunities: a target is worth about twice a carry, because it
+    # can gain yards through the air AND after the catch. One number that lets a
+    # pass-catching back and a between-the-tackles back be compared directly.
+    if {"carries", "targets"} <= set(frame.columns):
+        frame["adj_opportunities"] = (frame["carries"].fillna(0)
+                                      + 2 * frame["targets"].fillna(0))
+
+    # The source publishes target_share and air_yards_share but not this one.
+    if "carries" in frame.columns:
+        frame["carry_share"] = _team_share(frame, "carries")
+
     return frame
 
 
@@ -288,87 +327,153 @@ def _join_optional(frame, source, columns, key):
                        how="left")
 
 
-def _red_zone_touches(repo) -> pd.DataFrame:
-    """Count how often each player got the ball inside the twenty.
+def _count_by(plays, id_column, name):
+    """Count a filtered set of plays per player per week.
 
-    Red-zone work is where touchdowns come from, and touchdowns are most of what
-    separates a good fantasy week from an ordinary one. No summary table carries
-    this, so it is counted from the plays themselves.
+    The shared body of `_opportunity_counts` below. Every count it produces is
+    the same shape — some subset of the plays, credited to either the rusher or
+    the receiver — so the only things that change are which plays and which
+    column names the player.
 
     Steps:
-        1. Keep the plays inside the twenty.
-        2. Count the carries credited to each rusher and the targets credited to
-           each receiver.
-        3. Add the two together, since a touch is a touch.
+        1. Drop the plays with nobody in that role. A run has no receiver, and
+           `notna` is what keeps it out of a target count.
+        2. Count the remaining plays per player per week.
+        3. Rename the id column, so every piece can be merged on the same key.
+
+    Args:
+        plays: An already-filtered slice of the play-by-play table.
+        id_column: Which role to credit: "rusher_player_id" or
+            "receiver_player_id".
+        name: What to call the resulting count column.
+
+    Returns:
+        pd.DataFrame: `canonical_id`, `season`, `week` and one count column.
+            Only players who had at least one.
+    """
+    credited = plays[plays[id_column].notna()]
+    return (credited.groupby([id_column, "season", "week"], as_index=False)
+            .agg(**{name: ("play_id", "size")})
+            .rename(columns={id_column: "canonical_id"}))
+
+
+def _opportunity_counts(repo) -> pd.DataFrame:
+    """Count the high-value touches nobody publishes a summary of.
+
+    Touchdowns are most of what separates a good fantasy week from an ordinary
+    one, and they come from a handful of plays near the goal line. No summary
+    table carries these, so they are counted from the plays themselves — all six
+    in one pass, because they read the same table.
+
+    Steps:
+        1. Slice the plays four ways: inside the twenty, inside the five, with a
+           goal-to-go line to gain, and passes thrown as far as the goal line.
+        2. Count each slice with `_count_by` above, crediting the rusher for
+           carries and the receiver for targets.
+        3. Merge the six counts together with an outer join, so a player who
+           appears in only one still gets a row.
+        4. Fill the gaps with zero and add `red_zone_touches`, which is the two
+           red-zone counts back together.
 
     Args:
         repo: A `DfsReadRepo`, for the play-by-play table.
 
     Returns:
-        pd.DataFrame: `canonical_id`, `season`, `week` and `red_zone_touches`.
-            Only players who had at least one -- the caller fills the rest with
-            zero, which is what a blank means here.
+        pd.DataFrame: `canonical_id`, `season`, `week`, and the counts
+            `red_zone_carries`, `red_zone_targets`, `red_zone_touches`,
+            `inside_5_carries`, `inside_5_targets`, `goal_line_carries` and
+            `end_zone_targets`. Only players with at least one of something.
 
     Note:
         A TARGET COUNTS, NOT ONLY A CATCH. Being thrown at on the two-yard line
-        is the opportunity; whether it was caught is the outcome, and the whole
-        reason to look at usage separately from production is to see the
-        opportunity on its own.
+        is the opportunity; whether it was caught is the outcome, and looking at
+        usage separately from production is the whole point.
+
+        THE FOUR SLICES OVERLAP, deliberately. A carry from the three is inside
+        the five AND inside the twenty AND almost certainly goal-to-go, so it is
+        counted in three columns. They answer different questions — "how much
+        scoring work does he get" versus "does he get the ball on the doorstep" —
+        and making them exclusive would break both.
+
+        An END ZONE TARGET is a pass thrown at least as far as the goal line
+        (`air_yards >= yardline_100`), which is not the same as a target caught
+        in the end zone. Plays with no air yards recorded compare as False and
+        drop out on their own.
     """
     plays = repo.pbp()
-    inside = plays[plays["yardline_100"] <= 20]
 
-    touches = []
-    for column in ("rusher_player_id", "receiver_player_id"):
-        counted = (inside[inside[column].notna()]
-                   .groupby([column, "season", "week"], as_index=False)
-                   .agg(touches=("play_id", "size"))
-                   .rename(columns={column: "canonical_id"}))
-        touches.append(counted)
+    red_zone = plays[plays["yardline_100"] <= 20]
+    inside_5 = plays[plays["yardline_100"] <= 5]
+    goal_line = plays[plays["goal_to_go"] == 1]
+    end_zone = plays[plays["air_yards"] >= plays["yardline_100"]]
 
-    if not touches:
-        return pd.DataFrame(columns=["canonical_id", "season", "week",
-                                     "red_zone_touches"])
+    pieces = [
+        _count_by(red_zone, "rusher_player_id", "red_zone_carries"),
+        _count_by(red_zone, "receiver_player_id", "red_zone_targets"),
+        _count_by(inside_5, "rusher_player_id", "inside_5_carries"),
+        _count_by(inside_5, "receiver_player_id", "inside_5_targets"),
+        _count_by(goal_line, "rusher_player_id", "goal_line_carries"),
+        _count_by(end_zone, "receiver_player_id", "end_zone_targets"),
+    ]
 
-    return (pd.concat(touches)
-            .groupby(["canonical_id", "season", "week"], as_index=False)
-            .agg(red_zone_touches=("touches", "sum")))
+    keys = ["canonical_id", "season", "week"]
+    counts = pieces[0]
+    for piece in pieces[1:]:
+        counts = counts.merge(piece, on=keys, how="outer")
 
+    values = [column for column in counts.columns if column not in keys]
+    counts[values] = counts[values].fillna(0).astype(int)
 
-def _goal_line_carries(repo) -> pd.DataFrame:
-    """Count each back's carries from inside the five-yard line.
+    # Kept so the played-week Volume group keeps working -- it shows touches
+    # rather than the split.
+    counts["red_zone_touches"] = (counts["red_zone_carries"]
+                                  + counts["red_zone_targets"])
+    return counts
 
-    The single most valuable carry in fantasy football. A back who gets the ball
-    on the two scores roughly half the time, and a back who never does depends
-    on long runs that may not come -- so this separates two players who otherwise
-    look identical on volume.
+def _safe_ratio(numerator, denominator):
+    """Divide two columns, giving a blank rather than infinity when dividing by zero.
+
+    Rate statistics are undefined for a player who had no attempts at all, and
+    that is a different thing from a rate of zero. A receiver has no completion
+    percentage; he did not throw badly.
 
     Steps:
-        1. Keep the runs starting inside the five.
-        2. Count them per rusher per week.
+        1. Replace every zero denominator with NaN, which makes the division
+           produce NaN instead of infinity.
+        2. Divide.
 
     Args:
-        repo: A `DfsReadRepo`, for the play-by-play table.
+        numerator: The top of the ratio, as a column.
+        denominator: The bottom of the ratio, as a column.
 
     Returns:
-        pd.DataFrame: `canonical_id`, `season`, `week` and `inside_5_carries`.
-            Only players who had at least one -- the caller fills the rest with
-            zero, which is what a blank means here.
-
-    Note:
-        CARRIES ONLY, unlike `_red_zone_touches` above which counts targets too.
-        A goal-line carry is a designed handoff from a yard or two out; a target
-        from there is a different play with a different success rate, and pooling
-        the two would hide exactly the distinction this column exists to draw.
+        pd.Series: The ratio, NaN wherever the denominator was zero or missing.
     """
-    plays = repo.pbp()
-    inside = plays[(plays["yardline_100"] <= 5)
-                   & plays["rusher_player_id"].notna()]
+    return numerator / denominator.where(denominator != 0)
 
-    return (inside.groupby(["rusher_player_id", "season", "week"],
-                           as_index=False)
-            .agg(inside_5_carries=("play_id", "size"))
-            .rename(columns={"rusher_player_id": "canonical_id"}))
+
+def _team_share(frame, column):
+    """Work out what share of his team's weekly total each player accounted for.
+
+    The same shape as the `target_share` the source publishes, computed here for
+    the counts it does not cover.
+
+    Steps:
+        1. Total the column across every player on the same team in the same
+           week, and broadcast that total back onto each of their rows.
+        2. Divide each player's own count by it with `_safe_ratio` above, so a
+           team with none that week comes out blank rather than as a divide-by-
+           zero.
+
+    Args:
+        frame: The player-week table being built.
+        column: Which count to take a share of, such as "carries".
+
+    Returns:
+        pd.Series: The share, between 0 and 1, lined up with the frame's rows.
+    """
+    totals = frame.groupby(["team", "season", "week"])[column].transform("sum")
+    return _safe_ratio(frame[column], totals)
 
 
 def rolling_form(frame, canonical_id, games=5) -> dict:

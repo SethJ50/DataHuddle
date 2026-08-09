@@ -31,13 +31,13 @@ class Column(NamedTuple):
         scale: What to multiply the value by before showing it. 100 turns a
             fraction into a percentage. MUST BE SET EXPLICITLY rather than
             guessed from the format -- see the note.
+        width: How wide to draw the column: a pixel count, or one of "small",
+            "medium" and "large". Streamlit silently ignores anything else, so
+            "80px" does nothing.
 
-    Note:
-        THE SOURCES DISAGREE ABOUT PERCENTAGES. `snap_share` and `target_share`
-        arrive as fractions between 0 and 1, while `aggressiveness` and
-        `percent_attempts_gte_eight_defenders` arrive already multiplied out.
-        Scaling everything that displays with a percent sign would turn a
-        perfectly ordinary 40.6% into 4062%.
+            NONE MEANS "NOT SPECIFIED", not "no width" -- each page substitutes
+            its own default for it. A number here is an OVERRIDE of that default,
+            so only the handful of columns that genuinely differ need one.
     """
 
     field: str
@@ -45,6 +45,7 @@ class Column(NamedTuple):
     format: str = "%.1f"
     help: str = ""
     scale: float = 1.0
+    width: int | str | None = None
 
 
 # The columns every log starts with: which game this was.

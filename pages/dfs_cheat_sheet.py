@@ -18,12 +18,16 @@ Streamlit runs it top to bottom each time the page is shown, or any widget on
 it is changed.
 """
 
+import itertools
+
 import streamlit as st
 
 from presentation.dfs_cheatsheet import (
-    DEFAULT_COLUMNS, FLEX_POSITIONS, GROUPS, HISTORY_GAMES, POSITION_FILTERS,
-    SLATE_ONLY_GROUPS, build, position_defaults,
+    DEFAULT_COLUMN_WIDTH, DEFAULT_COLUMNS, FLEX_POSITIONS, GROUPS,
+    HISTORY_GAMES, POSITION_FILTERS, SLATE_ONLY_GROUPS, build, every_column,
+    position_defaults, scale_directions,
 )
+from presentation.st_tables import color_scale
 from services.dfs_dst_service import dst_weeks
 from services.dfs_player_service import player_weeks, slate
 from services.dfs_salary_service import DEFAULT_TRAILING_GAMES, slate_board
@@ -65,9 +69,17 @@ def load_slate(season, week):
 # ---------------------------------------------------------------------------
 # Which contest, which slate
 # ---------------------------------------------------------------------------
-controls = st.columns([1.6, 1.1, 1.1, 2.0, 2.4])
+# Settings on the left, the column picker on the right. Both containers are
+# created up front and written into further down, because several of these
+# controls cannot be drawn until data loaded by an earlier one is in hand -- the
+# week list needs the season, and the season list needs the contest.
+settings_col, picker_col = st.columns([3, 2])
 
-with controls[0]:
+with settings_col:
+    contest_row = st.columns([1, 1.4])     # Contest | Position
+    slate_row = st.columns(3)              # Season | Week | Form window
+
+with contest_row[0]:
     # The site choice drives the scoring as well as the prices, so the sheet
     # always shows one contest's salaries in that contest's own scoring. PPR is
     # here as the untouched source, and carries no prices.
@@ -91,7 +103,7 @@ priced = ({(int(row.season), int(row.week)) for row in loaded.itertuples()}
 seasons = sorted(set(frame["season"].dropna().astype(int))
                  | {season for season, _ in priced}, reverse=True)
 
-with controls[1]:
+with slate_row[0]:
     season = st.selectbox("Season", seasons, key="dfs_sheet_season")
 
 season_rows = frame[frame["season"] == season]
@@ -103,7 +115,7 @@ if not weeks:
     st.info("Nothing loaded for this season yet.", icon=":material/inbox:")
     st.stop()
 
-with controls[2]:
+with slate_row[1]:
     # Prefer a loaded slate, since that is the week somebody is deciding about.
     # Otherwise the most recent week that was a full slate rather than a playoff
     # round -- the last week of a finished season is the Super Bowl, two teams.
@@ -119,7 +131,7 @@ with controls[2]:
 
 is_slate = (season, week) in priced and scoring != DfsScoring.PPR
 
-with controls[3]:
+with contest_row[1]:
     # ONE POSITION AT A TIME. The columns worth seeing differ completely between
     # a quarterback and a defence, so a sheet showing all of them at once shows
     # each of them badly. FLX is the exception, and exists because a flex choice
@@ -136,7 +148,7 @@ wanted = list(FLEX_POSITIONS) if position == "FLX" else [position]
 # Build the board, one way or the other
 # ---------------------------------------------------------------------------
 if is_slate:
-    with controls[4]:
+    with slate_row[2]:
         form_games = st.slider("Form window (games)", 3, 10,
                                DEFAULT_TRAILING_GAMES, key="dfs_sheet_form")
 
@@ -158,7 +170,7 @@ if is_slate:
     )
     defaults = position_defaults(position)
 else:
-    with controls[4]:
+    with slate_row[2]:
         minimum_snaps = st.slider("Minimum snaps", 0, 40, 8,
                                   key="dfs_sheet_snaps",
                                   help="Hides players who barely appeared.")
@@ -173,30 +185,91 @@ else:
 # ---------------------------------------------------------------------------
 # Which columns
 # ---------------------------------------------------------------------------
-# The slate-only groups all describe trailing form or a fixture, which a week
-# that has already been played answers with what actually happened instead.
+# The two halves of the catalogue are EXCLUSIVE, not nested. A slate offers the
+# trailing-form groups and the fixture; a week already played offers what
+# actually happened. Neither mode's columns exist in the other's table, so
+# showing both would offer checkboxes that tick and change nothing -- and since
+# the two halves measure the same statistics, they read as duplicates.
 groups = {name: columns for name, columns in GROUPS.items()
-          if is_slate or name not in SLATE_ONLY_GROUPS}
+          if (name in SLATE_ONLY_GROUPS) == is_slate}
 
-with st.expander("Columns", expanded=False):
-    st.caption("Player, position, team and opponent are always shown. "
-               "Everything else is optional — the default set is deliberately "
-               "small, because more numbers per row helps you hesitate rather "
-               "than decide.")
+# WHICH COLUMNS ARE ON IS KEPT HERE, not read back off the checkboxes.
+#
+# Only one group's checkboxes are drawn at a time, and Streamlit DISCARDS the
+# state of any keyed widget it did not render on the last run. Collecting
+# `chosen` from the boxes on screen -- which is what this page used to do -- would
+# therefore forget every other group's ticks the moment you changed category.
+#
+# One store per mode and position, since a slate's sensible set is not a played
+# week's and a back's is not a defence's. Seeded from that combination's own
+# defaults the first time it is seen.
+selection_key = f"dfs_sheet_cols_{is_slate}_{position}"
+if selection_key not in st.session_state:
+    st.session_state[selection_key] = set(defaults)
+selected = st.session_state[selection_key]
 
-    chosen = []
-    for (name, columns), cell in zip(groups.items(), st.columns(len(groups))):
+
+def group_label(name):
+    """Name a group, and say how many of its columns are switched on.
+
+    The cost of showing one group at a time is that the others' ticks are out of
+    sight. Putting the count in the dropdown is what stops the picker feeling
+    like it has forgotten them.
+
+    Steps:
+        1. Count how many of that group's fields are in the current selection.
+        2. Append the count when there is one, and nothing when there is not, so
+           the untouched groups stay quiet.
+
+    Args:
+        name: The group's name, as it appears in GROUPS.
+
+    Returns:
+        str: Something like "Receiving (opps) · 3".
+    """
+    on = sum(1 for column in groups[name] if column.field in selected)
+    return f"{name} · {on}" if on else name
+
+
+# Drawn into the right-hand container reserved at the top of the page, so the
+# picker sits BESIDE the settings rather than under them -- and is narrower for
+# it, which is the point.
+picker = picker_col.expander(f"Columns · {len(selected)} on", expanded=False)
+with picker:
+    header = st.columns([3, 2], vertical_alignment="bottom")
+
+    with header[0]:
+        group_name = st.selectbox("Category", list(groups),
+                                  format_func=group_label,
+                                  key=f"dfs_sheet_group_{is_slate}_{position}")
+    with header[1]:
+        if st.button("Reset", width="stretch",
+                     help="Back to this position's default columns."):
+            st.session_state[selection_key] = set(defaults)
+            st.rerun()
+
+    st.caption("Player, position, team and opponent are always shown.")
+
+    # Three across, so a thirteen-column group is four short rows rather than one
+    # long one. The checkbox key carries the field, so switching category swaps
+    # the whole set of widgets rather than reusing them under new labels.
+    for column, cell in zip(groups[group_name],
+                            itertools.cycle(st.columns(3))):
         with cell:
-            st.markdown(f"**{name}**")
-            for column in columns:
-                # The key carries the mode, so each mode keeps its own ticks --
-                # a slate's sensible default set is not a played week's.
-                # The key carries the mode AND the position, so each keeps its
-                # own ticks -- a back's sensible default set is not a defence's.
-                if st.checkbox(column.label, value=column.field in defaults,
-                               key=f"dfs_sheet_{is_slate}_{position}_{column.field}",
-                               help=column.help or None):
-                    chosen.append(column.field)
+            ticked = st.checkbox(
+                column.label, value=column.field in selected,
+                key=f"dfs_sheet_{is_slate}_{position}_{column.field}",
+                help=column.help or None,
+            )
+        # Written straight back to the store, which is the only record of it.
+        if ticked:
+            selected.add(column.field)
+        else:
+            selected.discard(column.field)
+
+# Ordered by the catalogue rather than by when each was ticked, so the table's
+# shape stays familiar however somebody arrives at it.
+chosen = [column.field for column in every_column() if column.field in selected]
 
 # ---------------------------------------------------------------------------
 # The board
@@ -207,14 +280,33 @@ if board.empty:
 
 table, columns = build(board, chosen)
 
+# Blue for the good end of each column, red for the bad, nothing in the middle.
+# Ranked WITHIN THE ROWS ON SCREEN, so the colours answer "compared with the
+# other players I am choosing between" rather than "compared with the league".
+styled = table.style.apply(color_scale(scale_directions(table, columns)),
+                           axis=None)
+
+# KEYED BY LABEL, not by field. `build` gives the table two-level headings, and
+# Streamlit names such a column after the LEAF of the pair -- so the label is
+# what a config entry has to match. That is also why every label in a group set
+# has to be unique; see the test that enforces it.
+#
+# No label is passed to the column itself: the heading already comes from the
+# MultiIndex, and passing one here would override the group's leaf with the same
+# text to no effect.
 st.dataframe(
-    table, hide_index=True, width="stretch", height=620,
+    styled, hide_index=True, width="stretch", height=620,
     column_config={
-        column.field: (
-            st.column_config.NumberColumn(column.label, format=column.format,
-                                          help=column.help or None)
+        column.label: (
+            st.column_config.NumberColumn(
+                format=column.format, help=column.help or None,
+                width=column.width if column.width is not None
+                else DEFAULT_COLUMN_WIDTH)
             if column.format else
-            st.column_config.TextColumn(column.label, help=column.help or None)
+            st.column_config.TextColumn(
+                help=column.help or None,
+                width=column.width if column.width is not None
+                else DEFAULT_COLUMN_WIDTH)
         )
         for column in columns
     },
