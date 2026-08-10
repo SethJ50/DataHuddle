@@ -24,6 +24,7 @@ draft_manager_page = st.Page("pages/draft_manager.py", title = "Draft Manager")
 player_profile_page = st.Page("pages/player_profile.py", title = "Player Profile")
 team_profile_page = st.Page("pages/team_profile.py", title = "Team Profile")
 draft_plan_page = st.Page("pages/draft_plan.py", title = "Draft Plan")
+path_to_wr1_page = st.Page("pages/path_to_wr1.py", title = "Path to WR1")
 adp_comparison_page = st.Page("pages/adp_comparison.py", title = "ADP Comparison")
 draft_runner_page = st.Page("pages/draft_runner.py", title = "Draft Runner")
 sim_viewer_page = st.Page("pages/sim_viewer.py", title = "Sim Viewer")
@@ -40,7 +41,7 @@ dfs_cheat_sheet_page = st.Page("pages/dfs_cheat_sheet.py", title = "Cheat Sheet"
 
 pg = st.navigation({
     "": [home_page],
-    "Pre-Draft": [draft_manager_page, player_profile_page, team_profile_page, draft_plan_page, adp_comparison_page, draft_runner_page, sim_viewer_page],
+    "Pre-Draft": [draft_manager_page, player_profile_page, team_profile_page, draft_plan_page, path_to_wr1_page, adp_comparison_page, draft_runner_page, sim_viewer_page],
     "DFS": [dfs_basic_plots_page, dfs_player_profile_page, dfs_team_profile_page, dfs_cheat_sheet_page],
 })
 pg.run()

@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timezone
 
 from registry import Collections
+from scoring import PASSING_TD_POINTS
 from db.documents import find_one, find_all, upsert, delete
 from draft_model.config import DEFAULT_STARTING_SLOTS, normalize_keepers
 
@@ -80,7 +81,7 @@ class DraftService:
         return find_all(Collections.DRAFTS)
 
     def create_draft(self, name, num_teams, draft_position, num_rounds, platform,
-                    scoring_format, starting_slots=None, keepers=None, roster_size=None,
+                    scoring_format, passing_td_points=PASSING_TD_POINTS, starting_slots=None, keepers=None, roster_size=None,
                     has_keepers=False):
         """Save a brand new league's settings and return its ID.
 
@@ -104,6 +105,10 @@ class DraftService:
             num_rounds: How many rounds are drafted.
             platform: Where the league drafts: "espn", "yahoo", or "sleeper".
             scoring_format: A ScoringFormat's text value, such as "half_ppr".
+            passing_td_points: What one passing touchdown is worth, 4 or 6.
+                Stored on the draft because it is a LEAGUE rule rather than a
+                property of the scoring format, and it changes every
+                quarterback's projection.
             starting_slots: Maps a position to how many each team starts, for
                 example `{"QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1,
                 "K": 1, "DST": 1}`. Defaults to a standard 12-team lineup.
@@ -145,6 +150,7 @@ class DraftService:
             "num_rounds": num_rounds,
             "platform": platform,
             "scoring_format": scoring_format,
+            "passing_td_points": int(passing_td_points),
             "starting_slots": dict(starting_slots or DEFAULT_STARTING_SLOTS),
             "has_keepers": bool(has_keepers),
             "keepers": keeper_docs(keepers) if has_keepers else [],
@@ -156,7 +162,7 @@ class DraftService:
         return draft_id
 
     def update_draft(self, draft_id, name, num_teams, draft_position, num_rounds,
-                     platform, scoring_format, starting_slots=None, keepers=None,
+                     platform, scoring_format, passing_td_points=PASSING_TD_POINTS, starting_slots=None, keepers=None,
                      roster_size=None, has_keepers=False):
         """Change an existing league's settings, leaving its ID intact.
 
@@ -178,6 +184,10 @@ class DraftService:
             num_rounds: How many rounds are drafted.
             platform: Where the league drafts: "espn", "yahoo", or "sleeper".
             scoring_format: A ScoringFormat's text value, such as "half_ppr".
+            passing_td_points: What one passing touchdown is worth, 4 or 6.
+                Stored on the draft because it is a LEAGUE rule rather than a
+                property of the scoring format, and it changes every
+                quarterback's projection.
             starting_slots: Maps a position to how many each team starts.
                 Defaults to a standard 12-team lineup.
             keepers: The players kept before the draft, each naming the keeping
@@ -205,6 +215,7 @@ class DraftService:
             "num_rounds": num_rounds,
             "platform": platform,
             "scoring_format": scoring_format,
+            "passing_td_points": int(passing_td_points),
             "starting_slots": dict(starting_slots or DEFAULT_STARTING_SLOTS),
             "has_keepers": bool(has_keepers),
             "keepers": keeper_docs(keepers) if has_keepers else [],

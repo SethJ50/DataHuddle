@@ -19,6 +19,14 @@ RUSHING_YARDS_PER_POINT = 10
 RECEIVING_YARDS_PER_POINT = 10
 
 PASSING_TD_POINTS = 4
+"""What a passing touchdown is worth by default.
+
+A LEAGUE SETTING, not a property of the scoring format. Four is much the more
+common rule, but six-point passing leagues are ordinary enough that the number
+is stored on each draft and passed in here -- see `passing_td_points` on
+`fantasy_points` below. This is only the fallback for a caller that has no
+draft in hand, such as an ingestion script.
+"""
 RUSHING_TD_POINTS = 6
 RECEIVING_TD_POINTS = 6
 
@@ -96,7 +104,8 @@ SCORING_RULES: dict[ScoringFormat, ScoringRules] = {
 }
 
 
-def fantasy_points(stats: Mapping[str, T], fmt: ScoringFormat) -> T:
+def fantasy_points(stats: Mapping[str, T], fmt: ScoringFormat,
+                   passing_td_points: float = None) -> T:
     """Convert a stat line into season-total fantasy points.
 
     The single source of truth for the scoring formula. Both the app and the
@@ -130,9 +139,16 @@ def fantasy_points(stats: Mapping[str, T], fmt: ScoringFormat) -> T:
         make stored output stop matching.
     """
     rules = SCORING_RULES[fmt]
+
+    # The one rule that is a LEAGUE setting rather than a property of the
+    # format. None means "whatever the format says", which keeps every existing
+    # caller working unchanged.
+    per_passing_td = (rules.passing_td_points if passing_td_points is None
+                      else passing_td_points)
+
     return (
         stats["passing_yards"] / rules.passing_yards_per_point
-        + stats["passing_tds"] * rules.passing_td_points
+        + stats["passing_tds"] * per_passing_td
         + stats["interceptions"] * rules.interception_points
         + stats["rushing_yards"] / rules.rushing_yards_per_point
         + stats["rushing_tds"] * rules.rushing_td_points
@@ -143,7 +159,8 @@ def fantasy_points(stats: Mapping[str, T], fmt: ScoringFormat) -> T:
     )
 
 
-def fantasy_points_all_formats(stats: Mapping[str, T]) -> dict:
+def fantasy_points_all_formats(stats: Mapping[str, T],
+                               passing_td_points: float = None) -> dict:
     """Score one stat line under every scoring format at once.
 
     A convenience for the common case: the projections service stores all three
@@ -165,7 +182,8 @@ def fantasy_points_all_formats(stats: Mapping[str, T]) -> dict:
     Raises:
         KeyError: If any of STAT_KEYS is missing from `stats`.
     """
-    return {fmt: fantasy_points(stats, fmt) for fmt in ScoringFormat}
+    return {fmt: fantasy_points(stats, fmt, passing_td_points)
+            for fmt in ScoringFormat}
 
 
 def per_game(points: T, games: int = GAMES_PER_SEASON) -> T:
@@ -189,3 +207,25 @@ def per_game(points: T, games: int = GAMES_PER_SEASON) -> T:
             pandas Series you get infinity instead of an error.
     """
     return points / games
+
+
+def points_per_passing_td(draft) -> float:
+    """Read a draft's passing-touchdown rule, defaulting for older drafts.
+
+    One place to ask, so every page and service agrees -- and so a draft saved
+    before this setting existed keeps working instead of raising.
+
+    Steps:
+        1. Read the setting off the draft document.
+        2. Fall back to PASSING_TD_POINTS when it is absent, blank or zero. A
+           draft saved before the setting existed simply has no key, and a league
+           awarding no points at all for a passing touchdown does not exist.
+
+    Args:
+        draft: A draft document from DraftService. None is accepted and gives
+            the default, which is what a page shows before one is selected.
+
+    Returns:
+        float: What one passing touchdown is worth in this league.
+    """
+    return float((draft or {}).get("passing_td_points") or PASSING_TD_POINTS)

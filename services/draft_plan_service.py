@@ -158,7 +158,8 @@ class DraftPlanService:
         
         return picks
 
-    def rank_candidates(self, position, platform, fmt):
+    def rank_candidates(self, position, platform, fmt,
+                        passing_td_points=None):
         """Rank one position's players by your projections against platform ADP.
 
         This is what powers the player dropdown and the ADP / True Value / Diff
@@ -185,6 +186,9 @@ class DraftPlanService:
                 or "TE".
             platform: Which platform's ADP to use: "espn", "yahoo", or
                 "sleeper".
+            passing_td_points: What one passing touchdown is worth in this
+                league. None uses the four-point default. Only moves
+                quarterbacks, but it moves them a long way.
             fmt: HALF_PPR or FULL_PPR. This affects both which ADP number is used,
                 since ESPN and Sleeper track separate half and full-PPR ADP, and
                 which of your projected-points columns ranks "True Value".
@@ -232,7 +236,8 @@ class DraftPlanService:
             "fantasy_points_half_ppr_season" if fmt == ScoringFormat.HALF_PPR
             else "fantasy_points_full_ppr_season"
         )
-        projections = self._projections_service.get_own_projections()
+        projections = self._projections_service.get_own_projections(
+            passing_td_points=passing_td_points)
         points = projections[["canonical_id", points_column]].rename(
             columns={points_column: "projected_points"}
         )

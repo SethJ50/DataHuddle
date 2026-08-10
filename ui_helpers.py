@@ -12,7 +12,7 @@ to a few million numbers.
 import streamlit as st
 import pandas as pd
 from draft_model.config import normalize_keepers
-from scoring import ScoringFormat
+from scoring import PASSING_TD_POINTS, ScoringFormat, points_per_passing_td
 from services.draft_runner_service import resimulate
 
 # Pretty labels for the read-only display of a draft's saved settings.
@@ -60,6 +60,12 @@ def _draft_settings_panel(draft):
     st.write(f"**Platform:** {PLATFORM_LABELS.get(draft['platform'], draft['platform'])}")
     fmt = draft["scoring_format"]  # stored as the ScoringFormat .value string
     st.write(f"**Scoring:** {FORMAT_LABELS.get(fmt, fmt)}")
+
+    # Only worth a line when it is NOT the usual rule -- a six-point passing
+    # league changes every quarterback's value, and it should be visible on the
+    # page rather than remembered.
+    if points_per_passing_td(draft) != PASSING_TD_POINTS:
+        st.write(f"**Passing TD:** {points_per_passing_td(draft):.0f} pts")
 
     slots = draft.get("starting_slots")
     if slots:

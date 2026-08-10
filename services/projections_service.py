@@ -73,7 +73,8 @@ class ProjectionsService:
         """
         return self._ffb_adapter.analysts
 
-    def get_own_projections(self, analyst: str = None) -> pd.DataFrame:
+    def get_own_projections(self, analyst: str = None,
+                            passing_td_points: float = None) -> pd.DataFrame:
         """Get our own season-long and per-game fantasy point projections.
 
         The main entry point of this service. Ask for one analyst to see his
@@ -117,9 +118,12 @@ class ProjectionsService:
             projection as zero would bury deep players.
         """
         if analyst is not None:
-            return self._score(self._resolve(self._ffb_adapter.load(analyst)))
+            return self._score(self._resolve(self._ffb_adapter.load(analyst)),
+                               passing_td_points)
 
-        return self._blend(self._score(self._resolve(self._ffb_adapter.load_all())))
+        return self._blend(
+            self._score(self._resolve(self._ffb_adapter.load_all()),
+                        passing_td_points))
 
     def _resolve(self, df: pd.DataFrame) -> pd.DataFrame:
         """Attach canonical player IDs and drop anyone outside the app's roster.
@@ -158,7 +162,8 @@ class ProjectionsService:
         df = df.assign(canonical_id=canonical_id).dropna(subset=["canonical_id"])
         return df[df["canonical_id"].isin(self._roster_service.canonical_ids())]
 
-    def _score(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _score(self, df: pd.DataFrame,
+               passing_td_points: float = None) -> pd.DataFrame:
         """Add season and per-game fantasy points for every scoring format.
 
         Turns raw stat lines into the points those stats are worth. The formula
@@ -177,6 +182,8 @@ class ProjectionsService:
         Args:
             df: Resolved projections carrying every column named in
                 `scoring.STAT_KEYS`, such as `passing_yards` and `receptions`.
+            passing_td_points: What one passing touchdown is worth. None uses
+                the four-point default.
 
         Returns:
             pd.DataFrame: The input's columns plus two per scoring format:
@@ -189,7 +196,8 @@ class ProjectionsService:
         """
         df = df.copy()
         stats = {key: df[key] for key in scoring.STAT_KEYS}
-        for fmt, season_points in scoring.fantasy_points_all_formats(stats).items():
+        for fmt, season_points in scoring.fantasy_points_all_formats(
+                stats, passing_td_points).items():
             df[f"fantasy_points_{fmt.value}_season"] = season_points
             df[f"fantasy_points_{fmt.value}_per_game"] = scoring.per_game(season_points)
         return df
@@ -261,7 +269,7 @@ class ProjectionsService:
 
         return labels.merge(blended, on="canonical_id")
 
-    def disagreement(self, fmt) -> pd.DataFrame:
+    def disagreement(self, fmt, passing_td_points: float = None) -> pd.DataFrame:
         """Rank players by how much the three analysts disagree about them.
 
         A wide spread means the forecasters themselves are unsure, which is a
@@ -295,7 +303,7 @@ class ProjectionsService:
             else in the app.
         """
         column = f"fantasy_points_{fmt.value}_season"
-        blended = self.get_own_projections()
+        blended = self.get_own_projections(passing_td_points=passing_td_points)
 
         frame = blended[blended["n_analysts"] >= 2][[
             "canonical_id", "name", "position", column,

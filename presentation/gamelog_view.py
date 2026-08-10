@@ -130,7 +130,7 @@ def columns_for(position):
     return CONTEXT + stats + POINTS
 
 
-def add_fantasy_points(frame, fmt):
+def add_fantasy_points(frame, fmt, passing_td_points=None):
     """Score each of a player's games with the app's own scoring rules.
 
     nflreadpy publishes its own fantasy point columns, but they use ITS
@@ -149,6 +149,8 @@ def add_fantasy_points(frame, fmt):
     Args:
         frame: One player's game rows, from `PlayerDirectory.get_gamelog`.
         fmt: The ScoringFormat to score under.
+        passing_td_points: What one passing touchdown is worth in the
+            league. None uses the four-point default.
 
     Returns:
         pd.DataFrame: The input's columns plus `fantasy_points`, one value per
@@ -169,7 +171,8 @@ def add_fantasy_points(frame, fmt):
                 total = total + frame[source].fillna(0)
         stats[key] = total
 
-    frame["fantasy_points"] = scoring.fantasy_points(stats, fmt)
+    frame["fantasy_points"] = scoring.fantasy_points(stats, fmt,
+                                                     passing_td_points)
     return frame
 
 

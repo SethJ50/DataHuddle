@@ -15,7 +15,7 @@ it is changed.
 
 import streamlit as st
 from streamlit_state import get_app_context
-from scoring import ScoringFormat
+from scoring import ScoringFormat, points_per_passing_td
 
 from ui_helpers import (draft_selector, FORMAT_LABELS, adp_to_round_pick,
                         load_sim_board, load_platform_adp)
@@ -93,6 +93,7 @@ with right:
         # doesn't use is a trap. Stored as the .value string ("half_ppr"), which is
         # what the column name needs. Half PPR without a draft, as the dropdown did.
         fmt_value = draft["scoring_format"] if draft else ScoringFormat.HALF_PPR.value
+        pass_td = points_per_passing_td(draft)
         points_col = f"fantasy_points_{fmt_value}_season"
 
         st.caption(
@@ -105,7 +106,7 @@ with right:
 
             with depth_1_col:
                 @st.cache_data(show_spinner="Loading projections...")
-                def load_projection_board():
+                def load_projection_board(pass_td):
                     """Load every player's blended projection, reusing it between reruns.
 
                     Streamlit re-runs this whole file whenever any widget changes,
@@ -123,10 +124,11 @@ with right:
                             `fantasy_points_<fmt>_season` plus `_per_game` for
                             all three scoring formats.
                     """
-                    proj = ctx.projections_service.get_own_projections()
+                    proj = ctx.projections_service.get_own_projections(
+                        passing_td_points=pass_td)
                     return proj
 
-                proj = load_projection_board()
+                proj = load_projection_board(pass_td)
 
                 def top_by_position(df, position, n, points_col):
                     """Pick the best few projected players at one position.

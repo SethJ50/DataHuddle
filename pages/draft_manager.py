@@ -17,7 +17,7 @@ import pandas as pd
 import streamlit as st
 
 from streamlit_state import get_app_context
-from scoring import ScoringFormat
+from scoring import ScoringFormat, points_per_passing_td
 from draft_model.config import DEFAULT_STARTING_SLOTS, normalize_keepers
 from draft_model.mechanics import picks_for_slot
 
@@ -26,6 +26,12 @@ ctx = get_app_context()
 # Choices shared by the edit and create forms.
 PLATFORMS = ["espn", "yahoo", "sleeper"]
 FORMATS = list(ScoringFormat)  # REGULAR, HALF_PPR, FULL_PPR
+
+PASS_TD_HELP = ("What one passing touchdown is worth in your league. Four is "
+                "much the more common rule; six lifts every quarterback's "
+                "projection by roughly thirty points a season.")
+
+PASSING_TD_OPTIONS = [4, 6]
 
 # Order the lineup slots are shown in. FLEX sits after the positions it draws
 # from, since that's how it reads on a real league settings page.
@@ -367,6 +373,11 @@ with edit_tab:
             index=FORMATS.index(ScoringFormat(d["scoring_format"])),
             format_func=lambda f: f.value, key=f"dm_fmt_{did}",
         )
+        pass_td = st.selectbox(
+            "Passing TD points", PASSING_TD_OPTIONS,
+            index=PASSING_TD_OPTIONS.index(int(points_per_passing_td(d))),
+            key=f"dm_passtd_{did}", help=PASS_TD_HELP,
+        )
 
         st.divider()
         st.caption("Starting lineup")
@@ -404,7 +415,7 @@ with edit_tab:
                      disabled=bool(problems)):
             ctx.draft_service.update_draft(
                 did, name, num_teams, draft_position, num_rounds, platform, fmt.value,
-                starting_slots=starting_slots, keepers=keepers, roster_size=roster_size,
+                passing_td_points=pass_td, starting_slots=starting_slots, keepers=keepers, roster_size=roster_size,
                 has_keepers=has_keepers,
             )
             # No need to fix up the picker after a rename -- it stores draft_id,
@@ -492,6 +503,8 @@ with new_tab:
     num_rounds = st.number_input("Rounds", 1, 40, 15, key="dm_new_rounds")
     platform = st.selectbox("Platform", PLATFORMS, key="dm_new_plat")
     fmt = st.selectbox("Scoring format", FORMATS, format_func=lambda f: f.value, key="dm_new_fmt")
+    pass_td = st.selectbox("Passing TD points", PASSING_TD_OPTIONS,
+                           key="dm_new_passtd", help=PASS_TD_HELP)
 
     st.divider()
     st.caption("Starting lineup")
@@ -528,7 +541,7 @@ with new_tab:
     ):
         ctx.draft_service.create_draft(
             name.strip(), num_teams, draft_position, num_rounds, platform, fmt.value,
-            starting_slots=starting_slots, keepers=keepers, roster_size=roster_size,
+            passing_td_points=pass_td, starting_slots=starting_slots, keepers=keepers, roster_size=roster_size,
             has_keepers=has_keepers,
         )
 

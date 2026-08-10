@@ -296,3 +296,34 @@ def shade_cells(percentiles, **wash):
         return styles
 
     return _style
+
+
+def highlight_where(column, flags, color):
+    """Wash one column's cells wherever a separately supplied flag is true.
+
+    For marking a row by something that is NOT in the table -- a tag you saved
+    against the player, say. The flag lives outside the data being drawn, so
+    neither `highlight_true` nor `color_scale` above can reach it.
+
+    Steps:
+        1. Define an inner function pandas will call with the table.
+        2. Paint the named column wherever the matching flag is true, and leave
+           every other cell alone.
+
+    Args:
+        column: Which column to paint.
+        flags: One True/False per row, lined up with the table's rows.
+        color: The CSS colour to wash with. Use a translucent one, so the text
+            stays readable and one value works on both themes.
+
+    Returns:
+        A function suitable for `df.style.apply(fn, axis=None)`.
+    """
+    def _style(sub_df: pd.DataFrame) -> pd.DataFrame:
+        styles = pd.DataFrame("", index=sub_df.index, columns=sub_df.columns)
+        if column in sub_df.columns:
+            styles[column] = [f"background-color: {color}" if flag else ""
+                              for flag in flags]
+        return styles
+
+    return _style

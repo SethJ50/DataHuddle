@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 
 from draft_model.mechanics import picks_for_slot
-from scoring import ScoringFormat
+from scoring import PASSING_TD_POINTS, ScoringFormat, points_per_passing_td
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -208,6 +208,9 @@ class DraftConfig:
         num_rounds: Rounds drafted.
         draft_position: YOUR slot, 1-indexed (1 = first overall pick).
         scoring_format: Drives which FFC pool is used.
+        passing_td_points: What one passing touchdown is worth in this
+            league. Feeds the projections the value layer is built from,
+            NOT the sampler -- see `fingerprint` below.
         platform: Where the league actually drafts ("espn"/"yahoo"/"sleeper").
             Weighted up in the ADP blend, because the default player list a
             platform shows in-app anchors your real leaguemates far more than
@@ -228,6 +231,7 @@ class DraftConfig:
     num_rounds: int
     draft_position: int
     scoring_format: ScoringFormat
+    passing_td_points: float = PASSING_TD_POINTS
     platform: str = "espn"
     starting_slots: dict = field(default_factory=lambda: dict(DEFAULT_STARTING_SLOTS))
     keepers: tuple = ()
@@ -437,6 +441,12 @@ class DraftConfig:
             self.third_round_reversal,
         )
 
+    # NOTE: `passing_td_points` is deliberately NOT part of the fingerprint.
+    # The fingerprint answers "would the SIMULATION differ?", and the sampler
+    # draws on ADP alone -- what a passing touchdown is worth never changes
+    # which players come off the board, only what they are worth once they do.
+    # It belongs in `DraftSimService.board_signature`, which answers the broader
+    # "would the loaded board differ?", and it is there.
     def fingerprint(self) -> str:
         """Build a short ID summarizing every input the SIMULATION depends on.
 
@@ -561,6 +571,7 @@ class DraftConfig:
             "num_rounds": doc["num_rounds"],
             "draft_position": doc["draft_position"],
             "scoring_format": ScoringFormat(doc["scoring_format"]),
+            "passing_td_points": points_per_passing_td(doc),
             "platform": doc.get("platform", "espn"),
             "starting_slots": doc.get("starting_slots") or dict(DEFAULT_STARTING_SLOTS),
             "keepers": keepers if has_keepers else (),

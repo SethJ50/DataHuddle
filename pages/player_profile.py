@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from streamlit_state import get_app_context
-from scoring import ScoringFormat
+from scoring import ScoringFormat, points_per_passing_td
 from draft_model.queries import adjust_within_position
 from presentation.colors import position_badge_html
 from presentation.gamelog_view import add_fantasy_points, columns_for, shape
@@ -53,7 +53,7 @@ def load_player_index():
     ]
 
 @st.cache_data(show_spinner="Scoring players...")
-def load_player_stats(fmt_value):
+def load_player_stats(fmt_value, pass_td):
     """Build every player's projection, position rank, and adjusted ratings.
 
     The value half of the stats panel. None of it is draft-scoped — only the
@@ -96,7 +96,8 @@ def load_player_stats(fmt_value):
     # the ten blended stat columns. `_blend` averages EVERY numeric column, so the
     # raw stats survive the three-analyst blend alongside the points.
     points_col = f"fantasy_points_{fmt_value}_season"
-    projected = ctx.projections_service.get_own_projections()
+    projected = ctx.projections_service.get_own_projections(
+        passing_td_points=pass_td)
 
     # Intersected rather than indexed directly, so a stat the adapter stops
     # publishing leaves a blank row instead of raising on every page load.
@@ -259,6 +260,8 @@ with st.sidebar:
 # Which scoring format everything on this page is expressed in. Read from the
 # draft rather than a control; Half PPR without one, as elsewhere in the app.
 fmt_value = draft["scoring_format"] if draft else ScoringFormat.HALF_PPR.value
+# A league rule, so it rides with the format everywhere below.
+pass_td = points_per_passing_td(draft)
 
 player_col, stat_col, right = st.columns([3, 3, 6])
 
@@ -336,7 +339,7 @@ with player_col:
 with stat_col:
     # DataFrame indexed by canonical_id -- position, projection, pos_rank,
     # risk_adj, upside_adj.
-    stats = load_player_stats(fmt_value)
+    stats = load_player_stats(fmt_value, pass_td)
     row = stats.loc[canonical_id] if canonical_id in stats.index else None
 
     # --- draft position: where the market and the model expect him to go -----
@@ -437,7 +440,7 @@ with right:
             season = season if season in seasons else seasons[0]
 
             scored = add_fantasy_points(games[games["season"] == season],
-                                        ScoringFormat(fmt_value))
+                                        ScoringFormat(fmt_value), pass_td)
             table, present = shape(scored, columns_for(position))
 
             st.dataframe(

@@ -16,7 +16,7 @@ it is changed.
 import streamlit as st
 
 from streamlit_state import get_app_context
-from scoring import ScoringFormat
+from scoring import ScoringFormat, points_per_passing_td
 from ui_helpers import draft_selector, adp_to_round_pick, load_sim_board, PLATFORM_LABELS
 from registry import MARKING_CATEGORIES          # single source of truth for the marks
 from presentation.marks import MARK_COLORS, mark_column_config, visible_marks
@@ -98,6 +98,7 @@ with st.sidebar:
     num_rounds = draft["num_rounds"]
     platform = draft["platform"]
     scoring_format = ScoringFormat(draft["scoring_format"])
+    pass_td = points_per_passing_td(draft)
 
     st.divider()
     # Save every round/position's selected players for THIS draft to Mongo. The
@@ -182,7 +183,8 @@ with st.container(border=True):
         }
 
     @st.cache_data(show_spinner="Ranking candidates...")
-    def get_candidates_by_position(platform: str, fmt: ScoringFormat) -> dict:
+    def get_candidates_by_position(platform: str, fmt: ScoringFormat,
+                                   pass_td: float) -> dict:
         """Rank the candidates at every position, reusing the result between reruns.
 
         Building these tables touches the roster, the ADP comparison, and the
@@ -208,13 +210,14 @@ with st.container(border=True):
                 computed but not currently displayed by either table.
         """
         return {
-            position: ctx.draft_plan_service.rank_candidates(position, platform, fmt).set_index("display_name")
+            position: ctx.draft_plan_service.rank_candidates(position, platform, fmt,
+                                                       pass_td).set_index("display_name")
             for position in POSITIONS
         }
 
     # {'POS': DF [canonical_id, tier, adp, adp_rank, projected_points,
     #             true_value_rank, diff]}
-    by_name_by_position = get_candidates_by_position(platform, scoring_format)
+    by_name_by_position = get_candidates_by_position(platform, scoring_format, pass_td)
 
     # All markings for THIS draft, fetched once per rerun
     # {canonical_id: set(categories)}

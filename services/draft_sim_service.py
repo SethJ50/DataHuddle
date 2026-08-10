@@ -514,7 +514,8 @@ class DraftSimService:
                 f"Run scripts/load_data.py first."
             )
 
-        projections = self._projections_service.get_own_projections()
+        projections = self._projections_service.get_own_projections(
+            passing_td_points=config.passing_td_points)
         points_column = f"fantasy_points_{config.scoring_format.value}_season"
 
         return build_table(
@@ -664,6 +665,9 @@ class DraftSimService:
             "would the loaded board differ?", which is a broader question:
 
               fingerprint      -- teams, rounds, format, platform, keepers, seed
+              passing_td_points -- feeds the projections, so VORP and every
+                                  cost-of-waiting number, without changing a
+                                  single simulated pick
               draft_position   -- excluded from the fingerprint on purpose (it
                                   picks which columns you LOOK at, not how the
                                   draft unfolds) but it absolutely changes the
@@ -686,6 +690,9 @@ class DraftSimService:
         return "|".join(str(part) for part in (
             config.fingerprint(),
             config.draft_position,
+            # Not in the fingerprint -- it changes the VALUE layer, not the
+            # picks -- but it absolutely changes the board that gets loaded.
+            config.passing_td_points,
             sorted((config.starting_slots or {}).items()),
             config.roster_size,
             mtime,
