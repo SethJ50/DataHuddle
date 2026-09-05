@@ -1,7 +1,37 @@
+---
+title: DataHuddle
+emoji: 🏈
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Fantasy football analytics for daily fantasy contests
+---
+
+<!--
+The block above is not decoration: Hugging Face reads it to configure the
+Space, and it must be in a file named exactly README.md at the repository root.
+That is why this file is no longer `readme.md`.
+
+`title` is the DISPLAY name, which is separate from the Space's URL. The Space
+is called `data-caddie-shiny` for historical reasons and keeps that address all
+year; this line is what makes the page itself say DataHuddle while the football
+app is the one deployed.
+
+`app_port: 7860` must match the port in the Dockerfile's CMD.
+tests/test_deployment_config.py fails if they ever drift apart.
+
+GitHub renders this block as a small table at the top of the page. Harmless.
+See docs/HUGGINGFACE.md for the whole deployment.
+-->
+
 # DataHuddle
 DataHuddle is a custom web-application for fantasy football data!
 
 A single-user app — no login or accounts. See [PLANNING.md](PLANNING.md) for the underlying data model and implementation reference.
+
+**Deploying:** [docs/HUGGINGFACE.md](docs/HUGGINGFACE.md) covers the Hugging Face Space, including how the Space is shared with the golf app season by season.
 
 ## TODO
 - Culminate all data: FFB Ratings, ADP's and Platform Ratings, ...

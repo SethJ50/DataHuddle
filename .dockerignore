@@ -1,0 +1,48 @@
+# Things `docker build` should not copy into the image.
+#
+# Same idea as .gitignore, different question. .gitignore asks "should this be
+# in version control?"; this asks "does the RUNNING APP need this?". A file can
+# easily be a yes to the first and a no to the second -- the test suite, for
+# instance.
+#
+# Two reasons to bother: a smaller image builds and boots faster, and anything
+# left out cannot be served by accident.
+#
+# DELIBERATELY CONSERVATIVE. Only files nothing imports are listed. It is
+# tempting to drop draft_model/ too, since the draft pages are hidden on a
+# public deploy -- do not. `app_context.py` imports DraftSimService at module
+# level, so the app would fail to start with an ImportError before it ever got
+# as far as deciding which pages to show.
+
+# Version control. Copying it in would add the entire project history to the
+# image for no reason.
+.git
+.gitignore
+.gitattributes
+
+# Regenerable caches and OS junk
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+# Draft-simulation artifacts: ~81 MB of .npz files, and already untracked by
+# git. Only the Sim Viewer reads them, and that page is hidden on any
+# deployment -- see deployment.py.
+data/sim/
+
+# Tests, notebooks and documentation. All useful; none of it runs in the
+# container.
+tests/
+docs/
+*.ipynb
+*.md
+!README.md
+
+# Local tooling
+.claude/
+.agents/
+Developer Notes/
+.venv/
+venv/
