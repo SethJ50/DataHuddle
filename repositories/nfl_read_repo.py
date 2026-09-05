@@ -16,6 +16,12 @@ for an explicit reload (e.g. during the season).
 
 import nflreadpy as nfl
 
+from repositories.nflreadpy_setup import configure
+
+# Cache downloads to disk and retry a 503 rather than crashing the page. Done at
+# import, so it is in force before any getter below can run.
+configure()
+
 
 class NflReadRepo:
     """Loads and caches the three nflreadpy tables the app depends on.

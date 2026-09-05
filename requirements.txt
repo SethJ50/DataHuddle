@@ -13,6 +13,10 @@ polars
 # Backs the string dtype the DFS tables are stored in. Same reasoning.
 pyarrow
 requests
+# requests ships urllib3, but repositories/nflreadpy_setup.py imports Retry from
+# it directly to make nflverse downloads survive a 503. Declared so that
+# dependency is visible rather than accidental.
+urllib3
 
 # Dev / test only
 pytest

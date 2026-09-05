@@ -17,6 +17,12 @@ import pandas as pd
 
 import nflreadpy as _nflreadpy
 
+from repositories.nflreadpy_setup import configure
+
+# Cache downloads to disk and retry a 503 rather than crashing the page. Done at
+# import, so it is in force before any loader below can run.
+configure()
+
 
 PBP_COLUMNS = [
     # Who, when, and which play
