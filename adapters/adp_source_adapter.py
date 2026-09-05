@@ -10,6 +10,7 @@ number at which a player was taken. A lower number means he goes earlier.
 from typing import Protocol
 import numpy as np
 import pandas as pd
+from registry import parse_positions
 from scoring import ScoringFormat
 
 MAX_PLAUSIBLE_ADP = 500
@@ -231,13 +232,35 @@ class YahooAdpAdapter:
 
         Returns:
             pd.DataFrame: One row per player with columns `name`, `team`,
-                `position`, and `adp`.
+                `position`, `adp`, and `yahoo_rank`. The first four are the
+                common contract every ADP adapter returns; `yahoo_rank` is an
+                extra that only this source can supply.
 
         Raises:
             KeyError: If Yahoo's stored rows are missing one of those columns.
+
+        Note:
+            `yahoo_rank` is Yahoo's own BOARD ORDER -- the ranked list it shows a
+            drafter in-app -- which is a genuinely different thing from ADP.
+            Measured on the 2026 pull it correlates with Yahoo's ADP at 0.90 but
+            orders 210 of 223 players differently, so it carries real
+            information about who Yahoo is pushing rather than who got taken.
+
+            Yahoo is the ONLY source that publishes one. ESPN and Sleeper store
+            no rank at all, and their projections cannot stand in: sorting
+            Sleeper's players by projected points puts eleven quarterbacks in
+            the top fifteen, because raw points ignore positional scarcity.
+
+            It is passed through RAW and deliberately not cleaned here. The
+            values are sparse rather than a dense 1..N list -- they run to 2473
+            across 1,175 players -- so anything using them has to dense-rank
+            within its own pool first. `table.rank_to_pick_scale` does that.
+
+            Carrying an extra column is safe: AdpComparisonService selects the
+            columns it wants by name, so the comparison page is unaffected.
         """
         # One row per player, with a single `adp` column rather than one per
-        # scoring format, plus name, team, and position.
+        # scoring format, plus name, team, position, and Yahoo's board rank.
         df = self._collection_repo.read()
 
         return pd.DataFrame({
@@ -245,4 +268,88 @@ class YahooAdpAdapter:
             "team": df["team"],
             "position": df["position"],
             "adp": _drop_sentinels(df["adp"]),
+            # Optional extra, not part of the four-column contract. Missing it
+            # degrades to "no board data" rather than breaking the ADP path,
+            # which every other consumer of this adapter depends on.
+            "yahoo_rank": (pd.to_numeric(df["yahoo_rank"], errors="coerce")
+                           if "yahoo_rank" in df.columns else np.nan),
         })
+
+
+class EspnBoardRankAdapter:
+    """Provides ESPN's in-draft board order -- the ranked list it shows a drafter.
+
+    The counterpart to Yahoo's `yahoo_rank`, but it arrives as its own collection
+    rather than riding along with the ADP, because ESPN publishes no rank in its
+    projections export. It is scraped from the live draft board with
+    scripts/espn_board_rankings_console.js.
+
+    THE RANK IS THE ROW ORDER. ESPN prints no rank number in that table, so the
+    scraper numbers the rows as it walks them. That makes the file only as good
+    as the sort it was captured under -- see docs/UPDATING_DATA.md for the two
+    ways to get it silently wrong.
+    """
+
+    def __init__(self, collection_repo):
+        """Remember where ESPN's stored board rows can be read from.
+
+        Steps:
+            1. Save the repository on the instance. Nothing is read yet; the
+               database is only touched when `load` is called.
+
+        Args:
+            collection_repo: An object with a `.read()` method returning the
+                stored board rows as a DataFrame.
+        """
+        self._collection_repo = collection_repo
+
+    def load(self) -> pd.DataFrame:
+        """Read ESPN's board and rename its columns to the app's vocabulary.
+
+        Steps:
+            1. Call `.read()` on the repository to pull the collection into a
+               DataFrame.
+            2. Return an empty table with the right column names if nothing is
+               stored, so callers can use those columns unconditionally.
+            3. Build the canonical table, converting the rank with
+               `errors="coerce"` so a malformed value becomes NaN rather than
+               raising.
+            4. Normalize each position with `parse_positions` from registry.py,
+               taking the FIRST recognized one -- ESPN writes multi-position
+               players as "WR, CB", and it also spells defenses "D/ST".
+            5. Drop rows with no rank, then sort by it so the top of the board
+               comes first.
+
+        Returns:
+            pd.DataFrame: One row per player, sorted by rank, with columns
+                `name`, `team`, `position`, and `espn_rank` (1 being the best).
+
+        Raises:
+            KeyError: If the stored rows are missing one of the expected
+                columns, which would mean the scraper's output changed.
+
+        Note:
+            Covers roughly 1,000 players including kickers and defenses -- far
+            deeper than the ~250 the simulation pool needs. The extra rows cost
+            nothing: they simply never match a player in the pool.
+        """
+        # One row per player: espn_rank, name, team, position.
+        df = self._collection_repo.read()
+
+        if df.empty:
+            return pd.DataFrame(columns=["name", "team", "position", "espn_rank"])
+
+        def first_position(raw):
+            """ESPN writes "WR, CB" for multi-position players; keep the first."""
+            found = parse_positions(str(raw))
+            return found[0].value if found else ""
+
+        out = pd.DataFrame({
+            "name": df["name"].astype(str).str.strip(),
+            "team": df["team"].astype(str).str.strip().str.upper(),
+            "position": df["position"].map(first_position),
+            "espn_rank": pd.to_numeric(df["espn_rank"], errors="coerce"),
+        })
+
+        out = out.dropna(subset=["espn_rank"])
+        return out.sort_values("espn_rank").reset_index(drop=True)

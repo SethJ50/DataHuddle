@@ -37,6 +37,16 @@ class Collections:
     # RosterService's player universe (see FfbKdstAdapter).
     UDK_K_RANKINGS = "udk_k_rankings_ppr"
     UDK_DST_RANKINGS = "udk_dst_rankings_ppr"
+    # The Fantasy Footballers' single overall board -- every position on ONE
+    # ranked list, unlike the per-position files above. Full PPR with 6-point
+    # passing touchdowns, the only variant published, so it does NOT vary with a
+    # league's scoring format. Skill positions only; no K or DST.
+    UDK_TOP200 = "udk_top200_ppr_6"
+    # ESPN's in-draft board order, scraped with
+    # scripts/espn_board_rankings_console.js. The RANK IS THE ROW ORDER -- ESPN
+    # prints no rank number -- so this file is only as good as the sort it was
+    # captured under. See docs/UPDATING_DATA.md.
+    ESPN_BOARD_RANKINGS = "espn_board_rankings"
     DRAFTS = "drafts"
     PLAYER_MARKINGS = "player_markings"
     TEAM_NOTES = "team_notes"
@@ -86,6 +96,7 @@ class Position(str, Enum):
 
 POSITION_ALIASES = {
     "DEF": "DST",     # Yahoo, and Fantasy Football Calculator
+    "D/ST": "DST",    # ESPN
     "D": "DST",       # UDK's K/DST rankings export
     "PK": "K",        # Fantasy Football Calculator
 }

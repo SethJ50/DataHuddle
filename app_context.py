@@ -17,9 +17,11 @@ from repositories.player_directory import PlayerDirectory
 from repositories.player_identity_repo import PlayerIdentityRepo
 from adapters.ffb_projections_adapter import ANALYSTS, FfbProjectionsAdapter
 from adapters.udk_rankings_adapter import UdkRankingsAdapter
+from adapters.udk_top200_adapter import UdkTop200Adapter
 from services.projections_service import ProjectionsService
 from services.roster_service import RosterService
-from adapters.adp_source_adapter import EspnAdpAdapter, SleeperAdpAdapter, YahooAdpAdapter
+from adapters.adp_source_adapter import EspnBoardRankAdapter, EspnAdpAdapter, SleeperAdpAdapter, YahooAdpAdapter
+from services.adp_analysis_service import AdpAnalysisService
 from services.adp_comparison_service import AdpComparisonService
 from services.draft_plan_service import DraftPlanService
 from services.draft_service import DraftService
@@ -116,12 +118,18 @@ class AppContext:
         self.sleeper_adp_adapter = SleeperAdpAdapter(CollectionRepo(Collections.SLEEPER_PROJECTIONS))
         self.yahoo_adp_adapter = YahooAdpAdapter(CollectionRepo(Collections.YAHOO_DRAFTANALYSIS))
 
+        # ESPN's board arrives as its own scraped collection rather than inside
+        # its projections export -- see scripts/espn_board_rankings_console.js.
+        self.espn_board_adapter = EspnBoardRankAdapter(
+            CollectionRepo(Collections.ESPN_BOARD_RANKINGS))
+
         self.adp_comparison_service = AdpComparisonService(
             self.espn_adp_adapter,
             self.sleeper_adp_adapter,
             self.yahoo_adp_adapter,
             self.identity_repo,
             self.roster_service,
+            self.espn_board_adapter,
         )
 
         # One QB/flex repo pair per analyst. Their disagreement is a signal in
@@ -170,6 +178,19 @@ class AppContext:
             self.ffc_service,
             self.adp_comparison_service,
             self.projections_service,
+        )
+
+        # The Fantasy Footballers' single overall board -- every position on one
+        # ranked list, unlike the per-position files behind roster_service.
+        self.udk_top200_adapter = UdkTop200Adapter(CollectionRepo(Collections.UDK_TOP200))
+
+        # Lines the market, the platform's board, the simulation and your own
+        # rankings up per player. Reads only; it never runs a simulation.
+        self.adp_analysis_service = AdpAnalysisService(
+            self.draft_sim_service,
+            self.adp_comparison_service,
+            self.udk_top200_adapter,
+            self.identity_repo,
         )
         # Daily Fantasy's own data loader. Kept apart from `nfl_read_repo`
         # above because the two halves of the app want different sources over

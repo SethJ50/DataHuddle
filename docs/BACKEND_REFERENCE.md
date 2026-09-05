@@ -738,7 +738,7 @@ the only reason FFC is here.
 
 Four steps: `blend_adp` (weights renormalised **per player**, so a player in only
 one source gets that source's ADP undiluted) → `apply_platform_shift` (nudge FFC
-toward your platform, `PLATFORM_WEIGHT = 0.5`) → `fill_missing_stdev` → `build_table`.
+toward your platform, `config.platform_weight`, default 0.8; Yahoo's own number first mixes in its board order via `rank_to_pick_scale`) → `adjust_for_keepers` (restate the target as when a player goes in a league with THESE keepers) → `fit_to_pick_space` (squeeze the centre onto the pick numbers this draft can actually hand out) → `fill_missing_stdev` → `build_table`.
 
 ⚠️ **The table's row order defines the picks-matrix column order.** There is
 exactly one sort, in `build_table`, on `adp_target`. Re-sorting the table

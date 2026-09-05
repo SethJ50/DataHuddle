@@ -9,6 +9,8 @@ the Draft Plan and Sim Viewer share ONE cache entry for a picks matrix that runs
 to a few million numbers.
 """
 
+from collections import Counter
+
 import streamlit as st
 import pandas as pd
 from draft_model.config import normalize_keepers
@@ -203,6 +205,65 @@ def load_platform_adp(_ctx, platform, fmt_value):
         return {}
     return dict(zip(comparison["canonical_id"], comparison[column]))
 
+SELECTED_DRAFT_KEY = "selected_draft_id"
+"""Where the chosen league is remembered, shared by every page.
+
+NOT a widget key, and that is the whole point. Streamlit throws away the state
+of any widget that was not drawn on the latest run, so each page's dropdown is
+wiped the moment you navigate away from it -- which is why the selection used to
+snap back to the first draft on every page change. An ordinary session-state
+entry is never collected, so it outlives the widgets that read and write it."""
+
+
+def _duplicated_names(drafts) -> set:
+    """Find names that more than one draft is using.
+
+    Two leagues really can share a name -- nothing stops you saving "Yahoo
+    League 2026" twice -- and the picker has to stay usable when they do.
+
+    Steps:
+        1. Count how many drafts carry each name.
+        2. Keep the names counted more than once.
+
+    Args:
+        drafts: Every saved draft.
+
+    Returns:
+        set: The names in use more than once. Usually empty.
+    """
+    counts = Counter(draft["name"] for draft in drafts)
+    return {name for name, count in counts.items() if count > 1}
+
+
+def _draft_label(draft, duplicated) -> str:
+    """Write the name to show in the picker for one draft.
+
+    Steps:
+        1. Return the plain name when nothing else shares it.
+        2. Otherwise append the first few characters of the draft's id, which
+           is unique, so the two entries can be told apart and both stay
+           reachable.
+
+    Args:
+        draft: One draft document.
+        duplicated: The names in use more than once, from `_duplicated_names`
+            above.
+
+    Returns:
+        str: The label, such as "Yahoo Mimi League 2026" or
+            "Yahoo Mimi League 2026 (10ab9a)".
+
+    Note:
+        The settings panel drawn underneath the picker is what actually tells
+        two same-named leagues apart; the id suffix only guarantees the labels
+        differ. If you see one, you probably saved the same league twice and
+        want to delete one on the Draft Manager page.
+    """
+    if draft["name"] not in duplicated:
+        return draft["name"]
+    return f"{draft['name']} ({draft['draft_id'][:6]})"
+
+
 def draft_selector(ctx, page_key):
     """Draw the sidebar draft picker, and return whichever draft is selected.
 
@@ -237,15 +298,20 @@ def draft_selector(ctx, page_key):
         st.info("No drafts yet. Create one on the Draft Manager page.")
         return None
 
-    by_name = {d["name"]: d for d in drafts}
-    names = list(by_name)
+    by_id = {d["draft_id"]: d for d in drafts}
+    ids = list(by_id)
 
-    # honor an auto-selected id (e.g. one set elsewhere) if it's still present
-    preselect = st.session_state.get(f"{page_key}_draft_id")
-    index = next((i for i, d in enumerate(drafts) if d["draft_id"] == preselect), 0)
+    # Carry the selection over from whichever page you were on last. Falls back
+    # to the first draft when nothing is remembered, or when the remembered one
+    # has since been deleted.
+    remembered = st.session_state.get(SELECTED_DRAFT_KEY)
+    index = ids.index(remembered) if remembered in by_id else 0
 
-    chosen = st.selectbox("Draft", names, index=index, key=f"{page_key}_sel")
-    draft = by_name[chosen]
+    chosen = st.selectbox("Draft", ids, index=index, key=f"{page_key}_sel",
+                          format_func=lambda draft_id: _draft_label(
+                              by_id[draft_id], _duplicated_names(drafts)))
+    st.session_state[SELECTED_DRAFT_KEY] = chosen
+    draft = by_id[chosen]
 
     _draft_settings_panel(draft)
     return draft
