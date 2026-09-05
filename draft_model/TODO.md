@@ -260,7 +260,9 @@ full 1..180 coverage, 15 per team. Slot 5 of 12 → `(5, 20, 29, 44, ...)`, gaps
     - [x] `blend_adp(sources, weights)` — weights renormalized **per player**, so a deep
           player present only in Sleeper gets Sleeper's ADP, not a fifth of it
     - [x] `apply_platform_shift()` — `adp_target = ffc + w * (platform - ffc)`; unmatched
-          players keep their FFC value rather than becoming NaN
+          players are shifted by the median gap of their 20 nearest ADP neighbours
+          (`impute_missing_shift`), so all 16 defenses and 17 kickers — none of which ESPN
+          or Sleeper rank at all — ride the scale change instead of being stranded on FFC's
     - [x] `fill_missing_stdev()` — the three-step chain (§ 5.2), **no fitted model**:
           FFC stdev → `(high-low)/4` → median of 20 nearest-ADP **same-position** players,
           with a `MIN_STDEV` floor so a zero width can never make a player deterministic
@@ -599,7 +601,39 @@ scoring this model against reality — bucket predictions by decile and check wh
 
 Not blockers. Revisit with output in hand (§ 12).
 
-- [ ] Sweep `PLATFORM_WEIGHT` 0 → 1. If availability barely moves, cut the shift mechanism
+- [x] Sweep `PLATFORM_WEIGHT` 0 → 1 (2026-08-18). Availability moves a LOT — keep the
+      mechanism. Raising it works but trips the calibration gate above 0.5; see DESIGN.md § 12.
+- [x] Unlock `platform_weight` > 0.5 (2026-08-18). Default is now **1.0**. The blocker was
+      neither of the two suspects below — it was conservation: a draft of N picks hands out
+      1..N exactly once, so the platform blend's deeper scale forced every player to be
+      drafted early. `table.fit_to_pick_space` corrects it with one shared multiplier.
+      - [x] Rescale `stdev_target` by the ADP-band curve — BUILT AND MEASURED, moved the
+            calibration error 0.05 picks against 0.15 seed noise. Not the cause. Do not
+            rebuild; the FFC-spread-travels assumption is deliberate and holds.
+      - [x] Re-tune `STARTER_DEADLINE` / `NEED_BONUS` — NOT NEEDED. The per-position
+            residual was uniformly negative, i.e. an aggregate bias rather than a
+            redistribution between positions. Constants untouched.
+- [x] Keeper leagues were being scored against an unfair answer key (2026-08-18).
+      `table.adjust_for_keepers` restates the target as when a player goes in a league with
+      THESE keepers: each player moves up by the kept players going earlier than him, and
+      back down by the keeper picks landing before him. Yahoo Mimi went 5.24 -> 4.54 while
+      RISING from `platform_weight` 0.6 to 0.8, and its per-league override was removed.
+- [x] Yahoo's published board order now feeds the target (2026-08-18), at
+      `yahoo_rank_weight = 0.8` (board-dominant), inside Yahoo's existing share rather than a fourth
+      source. Measured effect 0.61 picks in a Yahoo league, 0.31 in an ESPN one; calibration
+      unchanged on all four leagues.
+- [x] ESPN's board captured and integrated (2026-08-18) via
+      `scripts/espn_board_rankings_console.js` -> `espn_board_rankings` (1,027 players).
+      `AdpComparisonService.board_rank(source)` and `DraftSimService._board_view` are now
+      source-agnostic, so ESPN leagues get the same 44.8% board share Yahoo leagues had.
+      965 of 1,027 names resolve; the 62 misses are all 32 team defenses (structurally
+      unresolvable) plus 30 players outside the app's universe.
+- [ ] Sleeper still has no board and no usable substitute. Lowest priority — no saved league
+      drafts there.
+- [ ] Revisit `KEEPER_CALIBRATION_ALLOWANCE` (3x). It exists because keeper leagues could not
+      reproduce vendor ADP — but now that the target is keeper-adjusted, most of that excuse
+      is gone. Yahoo Mimi sits at 4.54 against a 2.0 tolerance, so something real is still
+      unmodelled there; worth finding out what before tightening the allowance.
 - [ ] Compare simulated positional-run frequency to real drafts; tune `STARTER_DEADLINE` /
       `NEED_BONUS`
 - [ ] Revisit `RHO` once real draft logs exist — it cannot be fit from ADP/stdev alone

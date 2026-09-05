@@ -6,10 +6,15 @@ draft to an obviously-correct slow version -- given the same boards -- is what
 turns a future drift into a failing test rather than quietly changed advice.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
-from draft_model.config import POSITIONS, UNDRAFTED, DraftConfig
+from draft_model.config import (
+    FLEXIBLE_POSITIONS, HARD_LIMIT, MIN_ROSTER_SLACK, POSITIONS, UNDRAFTED,
+    DraftConfig, roster_limits,
+)
 from draft_model.engine import (
     draw_boards, monte_carlo_sim, position_index, sim_batch, sim_one_draft_reference,
 )
@@ -280,3 +285,85 @@ def test_state_with_the_wrong_number_of_rows_says_so():
     with pytest.raises(ValueError, match="already_drafted has 3 rows"):
         monte_carlo_sim(mu, sd, pos_index, config, n_sims=6, batch_size=2,
                         already_drafted=np.zeros((3, 20), dtype=bool))
+
+
+# --------------------------------------------------------------------------
+# roster limits scale with draft depth
+# --------------------------------------------------------------------------
+# HARD_LIMIT sums to 18, so a 17-round draft leaves a manager one spare slot and
+# his late picks stop being choices at all -- he takes whatever position he has
+# room for. That broke calibration on a real 10-team/17-round league (2.79 picks
+# of error against a 2.0 tolerance) while the same league at 15 rounds passed.
+
+def test_shallow_drafts_keep_the_base_limits_exactly():
+    # LOAD-BEARING. Widening the caps changes which players come off the board,
+    # and HARD_LIMIT is not part of DraftConfig.fingerprint -- so a change here
+    # would leave every saved artifact stale under its existing filename. Only
+    # `num_rounds`, which IS fingerprinted, may move these.
+    for num_rounds in range(1, 16):
+        assert roster_limits(num_rounds) == HARD_LIMIT
+
+
+def test_deep_drafts_are_widened_enough_to_leave_a_real_choice():
+    for num_rounds in range(16, 25):
+        limits = roster_limits(num_rounds)
+        slack = sum(limits.values()) - num_rounds
+        assert slack >= MIN_ROSTER_SLACK, f"{num_rounds} rounds left slack {slack}"
+
+
+def test_widening_only_touches_the_flexible_positions():
+    # Deep benches are built of RBs and WRs. A manager does not answer two extra
+    # rounds with a third quarterback, so widening QB/TE would buy the same slack
+    # while making the simulated rosters less realistic.
+    limits = roster_limits(20)
+    for position, base in HARD_LIMIT.items():
+        if position in FLEXIBLE_POSITIONS:
+            assert limits[position] > base
+        else:
+            assert limits[position] == base
+
+
+def test_deep_draft_still_matches_the_reference_implementation():
+    # The widened caps have to reach BOTH paths. If only sim_batch got them, the
+    # two would silently disagree on exactly the drafts this fix exists for.
+    config = make_config(num_teams=4, num_rounds=18)
+    mu, sd, pos_index = make_pool(120, seed=31)
+    boards = draw_boards(mu, sd, config.num_teams, np.random.default_rng(5), n_sims=3)
+
+    fast = sim_batch(boards, pos_index, config)
+    for sim in range(fast.shape[0]):
+        slow = sim_one_draft_reference(boards[sim], pos_index, config)
+        assert np.array_equal(fast[sim], slow), f"divergence in simulation {sim}"
+
+
+def test_deep_draft_tracks_adp_better_than_the_base_limits_would():
+    # The regression itself, in miniature: with no roster slack the deep picks
+    # are dictated by capacity rather than by board value, and simulated ADP
+    # drifts away from the target it was drawn from.
+    from draft_model import engine
+
+    config = make_config(num_teams=10, num_rounds=17)
+    mu, sd, pos_index = make_pool(230, seed=17)
+
+    def mean_abs_error():
+        picks = monte_carlo_sim(mu, sd, pos_index, config, n_sims=200)
+        sim_adp = np.where(picks < UNDRAFTED, picks, np.nan).astype(float)
+        # A player drafted in no simulation has no mean pick. NaN is the right
+        # answer; numpy's "mean of empty slice" notice about it is just noise.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            mean_pick = np.nanmean(sim_adp, axis=0)
+        drafted_often = (picks < UNDRAFTED).mean(axis=0) >= 0.8
+        return float(np.nanmean(np.abs(mu[drafted_often] - mean_pick[drafted_often])))
+
+    widened = mean_abs_error()
+
+    # Pin the caps back to the base values to recreate the old behaviour.
+    original = engine.roster_limits
+    engine.roster_limits = lambda num_rounds: dict(HARD_LIMIT)
+    try:
+        cramped = mean_abs_error()
+    finally:
+        engine.roster_limits = original
+
+    assert widened < cramped, f"widened {widened:.2f} not better than {cramped:.2f}"

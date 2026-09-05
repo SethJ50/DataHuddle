@@ -52,9 +52,43 @@ Large enough to push him below every real candidate, so he is effectively
 unpickable without needing a separate 'is this legal' branch."""
 
 HARD_LIMIT = {"QB": 2, "RB": 6, "WR": 6, "TE": 2, "K": 1, "DST": 1}
-"""Most players a simulated manager will roster at each position. Too tight and
-the board can lock up (validate_sim's pick-count check catches that); too loose
-and simulated rosters stop resembling real ones."""
+"""Most players a simulated manager will roster at each position, in a draft
+shallow enough for these to be a real choice. Too tight and the board can lock
+up (validate_sim's pick-count check catches that); too loose and simulated
+rosters stop resembling real ones.
+
+These sum to 18, so they only describe a manager's PREFERENCES while the draft
+is meaningfully shorter than that. Read `roster_limits` below rather than this
+dictionary directly -- a deep draft needs them widened, for the reason given
+there."""
+
+MIN_ROSTER_SLACK = 3
+"""How many roster slots a manager must have left over after a full draft.
+
+Slack is what makes a late pick a CHOICE. With capacity 18 and a 17-round
+draft, a manager has one spare slot, so his last few picks are decided by which
+position he still has room for rather than by who he rates highest -- and the
+simulation stops reproducing ADP, because ADP is a statement about preferences.
+
+Measured on the ESPN Fantasy Freaks league (10 teams, 17 rounds), mean
+|simulated ADP - target| over the reliably-drafted players:
+
+    slack 1 (capacity 18)   2.79   FAIL, and the calibration trace RISES
+    slack 3 (capacity 20)   1.68   pass
+    slack 5 (capacity 22)   1.66   pass
+    slack 7 (capacity 24)   1.63   pass
+
+The cliff between 1 and 3 is the constraint releasing; everything past 3 is
+noise. 3 is also what a 15-round draft has under the base limits above, which
+is the shape these constants were originally tuned against."""
+
+FLEXIBLE_POSITIONS = ("RB", "WR")
+"""Which positions absorb the extra depth when `roster_limits` widens.
+
+Deep benches are built out of running backs and receivers -- handcuffs, injury
+stashes, lottery tickets. Managers do not respond to two extra rounds by
+rostering a third quarterback or a third tight end, so widening those instead
+would buy the same slack while making the simulated rosters less realistic."""
 
 POSITIONS = ("QB", "RB", "WR", "TE", "K", "DST")
 """Canonical position order. The INDEX of a position in this tuple is how it is
@@ -68,10 +102,142 @@ STARTER_DEADLINE = {"QB": 100, "RB": 60, "WR": 60, "TE": 100, "K": 170, "DST": 1
 reaching for one. The K/DST values are load-bearing now that those positions are
 in the pool -- they are what stops the simulator drafting kickers in round 8."""
 
-PLATFORM_WEIGHT = 0.5
-"""How far to shift FFC's ADP toward your platform's. 0.0 = pure FFC.
-Worth a sensitivity sweep: if moving this 0 -> 1 barely changes availability,
-the whole shift mechanism isn't earning its complexity."""
+PLATFORM_WEIGHT = 0.8
+"""Default for `DraftConfig.platform_weight` -- how far to shift FFC's ADP
+toward your platform's. 0.0 = pure FFC, 1.0 = pure platform.
+
+Read `config.platform_weight`, not this constant, anywhere a config is in hand.
+This is only the default a config falls back to, and it is now a real per-config
+field, so raising it is a one-line change that mints its own artifacts.
+
+RAISED 0.5 -> 0.8 (2026-08-18), once `table.fit_to_pick_space` removed what was
+actually blocking it. FFC keeps a 20% share of the centre as a stabilizer --
+`blend_adp` renormalizes per player, so a player only one platform ranks arrives
+undiluted next to one with a clean three-way average, and FFC damps that. It
+also still supplies every `stdev` and the player pool.
+
+EVERY LEAGUE RUNS AT THIS VALUE, including the 12-keeper one. That is only true
+because of `table.adjust_for_keepers`; before it existed, the keeper league had
+to be dropped to 0.6 to save at all.
+
+The sweep this note used to ask for (ESPN Fantasy Freaks, 10 teams / 17 rounds /
+full PPR, 8 calibration passes x 2k, 10k final), BEFORE the scale fix:
+
+    weight   |sim - target|   |sim - platform|   gate
+    0.00          3.77             13.30         FAIL
+    0.50          3.42              8.19         pass
+    0.75          4.84              6.29         FAIL
+    1.00          5.57              5.57         FAIL
+
+Raising the weight always moved the board toward the platforms, but above 0.5
+the simulation could no longer reproduce its own target and the gate blocked
+saving. The cause was NOT positional flow and NOT the widths -- both were
+measured and cleared. It was arithmetic: a draft of N picks hands out the
+numbers 1..N exactly once, so the drafted players average pick (N+1)/2 no matter
+what. The platform blend spreads players deeper than that, forcing every player
+to be drafted early. See `table.fit_to_pick_space` for the measurements.
+
+0.5 was never a well-chosen value -- it simply happened to be where FFC's and
+the platforms' scales cancelled, a coincidence that would drift the moment
+either source moved.
+
+MEASURED RESULT (before = 0.5 with none of today's corrections):
+
+    league                    |sim - platform|   rank corr
+    ESPN Fantasy Freaks        7.51 -> 4.55      0.982 -> 0.996
+    Test Draft 2026            7.39 -> 4.99      0.981 -> 0.996
+    Test Yahoo Keepers          7.35 -> 5.73      0.948 -> 0.963
+    Yahoo Mimi (12 keepers)   16.34 -> 14.87      0.808 -> 0.827
+
+Mimi's raw distance stays large ON PURPOSE. It is a keeper league, so its draft
+genuinely should NOT match redraft ADP -- 12 of the best players never reach the
+board. Judge it by |sim - target| against the keeper-adjusted target instead,
+which is 4.54 and better than the 5.45 it scored before any of this, at a much
+higher platform weight.
+
+WHAT REMAINS TRUE AT 0.8. FFC barely anchors the centre now, which costs two
+things worth remembering:
+
+  1. Scoring-format sensitivity. FFC is the only format-correct source; ESPN
+     stores one number for both half and full PPR, and Yahoo publishes one ADP
+     regardless. The centre is now less responsive to league scoring.
+  2. The clean fallback. Platform ADP arrives via manually-refreshed CSVs. Set
+     this back to 0.0 to recover pure FFC whenever they go stale -- that path is
+     still tested and still works.
+
+`stdev_target` remains FFC-scale by explicit decision: FFC's spread is taken to
+describe how much a player's pick varies, whatever centre he is placed at. It is
+also the only source of spread that exists. Rescaling widths by the ADP-band
+curve was built and measured, and moved the calibration error by 0.05 picks
+against seed noise of 0.15 -- i.e. nothing. Do not rebuild it."""
+
+DRAFTING_PLATFORM_WEIGHT = 0.7
+"""Default for `DraftConfig.drafting_platform_weight` -- how much of the ADP
+blend comes from the platform the league ACTUALLY drafts on. The other two split
+whatever is left, evenly.
+
+    0.70  ->  your platform 0.70, each other platform 0.15
+    0.50  ->  your platform 0.50, each other platform 0.25   (the old value)
+    0.33  ->  all three equal
+
+RAISED 0.5 -> 0.7 (2026-08-18). The reasoning has been in this file since the
+blend was written and is worth acting on rather than restating: the default list
+a platform shows in-app anchors your real leaguemates far more than any
+consensus does. The other two platforms are then a sanity check on your own,
+which is what "a little bit" of influence should mean.
+
+ONE knob rather than a table of three, because the three are not independent --
+they are shares of one blend. Deriving the others from this value makes it
+impossible to write a set that does not sum to 1, which the previous pair of
+constants happily allowed.
+
+A platform outside the three (a Fantrax league, say) falls back to an even split,
+since none of the sources is "yours" in that case."""
+
+BOARD_RANK_WEIGHT = 0.6
+"""Default for `DraftConfig.board_rank_weight` -- how much of each platform's
+contribution to the ADP blend comes from its BOARD ORDER rather than from what
+its drafters actually did.
+
+    yahoo_number = (1 - w) * yahoo_adp + w * yahoo_board_rank_in_picks
+
+ADP says when a player WAS taken; the board is the ranked list Yahoo puts in
+front of a drafter, which is what anchors them in the first place. Yahoo is the
+only source that publishes one -- ESPN's is a separate scraped collection
+(scripts/espn_board_rankings_console.js -> espn_board_rankings), and Sleeper has
+none at all -- its projections are not a substitute, since sorting them by
+points puts eleven quarterbacks in the top fifteen, because raw points ignore
+positional scarcity.
+
+It applies INSIDE each platform's existing share, never as extra sources. Extra
+sources would quietly raise the platforms that HAVE a board above the ones that
+do not, which is a platform-balance change wearing a rank feature's clothes.
+
+BOARD-DOMINANT BY DELIBERATE JUDGMENT (2026-08-18), not from a fitted number.
+The claim being made is that the ranked list a drafter is looking at drives the
+pick, and that observed ADP is best read as an ADJUSTMENT to it -- where the
+market has collectively decided the board is wrong. Went 0.35 -> 0.5 -> 0.8 in
+one day as that belief firmed up.
+
+EXPECT A SMALL EFFECT ANYWAY, and do not mistake that for a bug. Measured on the
+2026 pull in a Yahoo league, mean movement of the blended centre:
+
+    weight 0.25   0.44 picks    max  3.04
+    weight 0.35   0.62 picks    max  4.25
+    weight 0.50   0.88 picks    max  6.07
+    weight 0.80   1.41 picks    max  9.72   <- this default
+    weight 1.00   1.76 picks    max 12.15
+
+It is gentle by construction: board rank and ADP already agree at rho = 0.90,
+and Yahoo carries only 25-50% of the blend. In an ESPN league the effect is
+roughly halved again. Raising this cannot produce a large move -- if you want
+the board to genuinely drive an ESPN league, the missing ingredient is ESPN's
+own Top 300, not a bigger number here.
+
+Also note this partly DOUBLE-COUNTS: Yahoo's ADP already reflects Yahoo's board,
+because drafters follow it. At an even split that double-counting is the POINT
+-- the claim being made is that the published list deserves as much say as the
+behaviour it produced, not that the two are independent evidence."""
 
 POOL_MULTIPLIER = 1.5
 """Drop players with adp beyond total_picks * this. A player with ADP 400 in a
@@ -90,6 +256,57 @@ DEFAULT_STARTING_SLOTS = {
     "QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1, "K": 1, "DST": 1,
 }
 """Fallback lineup for drafts saved before starting_slots existed."""
+
+
+# ---------------------------------------------------------------------------
+# Roster limits
+# ---------------------------------------------------------------------------
+
+
+def roster_limits(num_rounds: int) -> dict:
+    """Work out the roster caps to simulate with, given how deep the draft runs.
+
+    HARD_LIMIT above describes what a manager WANTS at each position, and it
+    sums to 18. A 15-round draft leaves him three spare slots, so his late picks
+    are still genuine choices. A 17-round draft leaves one, and at that point he
+    is not choosing at all -- he takes whatever position he has room for, and the
+    simulation stops being able to reproduce ADP. This widens the caps until
+    there is room to choose again.
+
+    Steps:
+        1. Copy HARD_LIMIT, so the module-level constant is never mutated.
+        2. While the spare capacity is under MIN_ROSTER_SLACK, add one slot to
+           each position in FLEXIBLE_POSITIONS. Each pass adds two slots, so this
+           always terminates.
+        3. Hand back the widened copy.
+
+    Args:
+        num_rounds: How many rounds the draft runs, which is how many players
+            each manager ends up with.
+
+    Returns:
+        dict: Position name to the most players a simulated manager will roster
+            there. Identical to HARD_LIMIT for any draft of 15 rounds or fewer,
+            which is what keeps already-saved simulations valid.
+
+    Note:
+        NO-OP AT 15 ROUNDS AND BELOW, deliberately. Widening the caps changes
+        which players come off the board, so it changes the picks matrix -- and
+        HARD_LIMIT is not part of `DraftConfig.fingerprint`, so a matrix that
+        changed here would NOT get a new filename. Every existing artifact would
+        silently become stale. Because the result depends only on `num_rounds`,
+        which IS fingerprinted, that cannot happen: a draft deep enough to widen
+        is a draft whose fingerprint already differs.
+
+        The corollary is that hand-editing HARD_LIMIT, MIN_ROSTER_SLACK or
+        FLEXIBLE_POSITIONS invalidates saved artifacts without renaming them.
+        Re-run `scripts/run_draft_sim.py --all` after touching any of the three.
+    """
+    limits = dict(HARD_LIMIT)
+    while sum(limits.values()) - num_rounds < MIN_ROSTER_SLACK:
+        for position in FLEXIBLE_POSITIONS:
+            limits[position] += 1
+    return limits
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +432,17 @@ class DraftConfig:
             Weighted up in the ADP blend, because the default player list a
             platform shows in-app anchors your real leaguemates far more than
             any consensus ranking does.
+        platform_weight: How far `adp_target` moves from FFC's ADP toward that
+            blend, between 0.0 (pure FFC) and 1.0 (pure platform). A field
+            rather than a bare constant SO THAT IT IS FINGERPRINTED -- see
+            `fingerprint` below, where changing it is what mints a new artifact
+            instead of silently serving one built under a different weight.
+        drafting_platform_weight: How much of the blend comes from `platform`
+            itself, between 0.0 and 1.0. The other two platforms split the
+            remainder evenly. Fingerprinted, for the same reason.
+        board_rank_weight: How much of each platform's own contribution comes
+            from its published board order rather than its ADP, between 0.0 and
+            1.0. Fingerprinted for the same reason as `platform_weight`.
         starting_slots: Position -> starters. Sets the VORP replacement level,
             which is why hardcoding replacement ranks breaks at any other size.
         keepers: A tuple of Keeper records, one per keeping team. Each names a
@@ -233,6 +461,9 @@ class DraftConfig:
     scoring_format: ScoringFormat
     passing_td_points: float = PASSING_TD_POINTS
     platform: str = "espn"
+    platform_weight: float = PLATFORM_WEIGHT
+    drafting_platform_weight: float = DRAFTING_PLATFORM_WEIGHT
+    board_rank_weight: float = BOARD_RANK_WEIGHT
     starting_slots: dict = field(default_factory=lambda: dict(DEFAULT_STARTING_SLOTS))
     keepers: tuple = ()
     roster_size: int | None = None
@@ -253,11 +484,14 @@ class DraftConfig:
             2. Reject a draft with no rounds.
             3. Reject a draft position outside the range of real slots, which is
                1 up to the number of teams.
-            4. Reject any keeper whose team or round falls outside the league,
+            4. Reject a platform weight outside 0.0 to 1.0, since the shift it
+               controls is an interpolation between two sources and a value
+               outside that range would push ADP past BOTH of them.
+            5. Reject any keeper whose team or round falls outside the league,
                since a keeper on a pick that does not exist could not be spent.
-            5. Reject two keepers on the same team-and-round, which would want
+            6. Reject two keepers on the same team-and-round, which would want
                one pick to be consumed twice.
-            6. Reject the same player being kept by two different teams.
+            7. Reject the same player being kept by two different teams.
 
         Returns:
             None: Returning normally means the configuration is usable.
@@ -273,6 +507,21 @@ class DraftConfig:
         if not 1 <= self.draft_position <= self.num_teams:
             raise ValueError(
                 f"draft_position {self.draft_position} outside 1..{self.num_teams}"
+            )
+        if not 0.0 <= self.platform_weight <= 1.0:
+            raise ValueError(
+                f"platform_weight must be between 0.0 and 1.0, "
+                f"got {self.platform_weight}"
+            )
+        if not 0.0 <= self.board_rank_weight <= 1.0:
+            raise ValueError(
+                f"board_rank_weight must be between 0.0 and 1.0, "
+                f"got {self.board_rank_weight}"
+            )
+        if not 0.0 <= self.drafting_platform_weight <= 1.0:
+            raise ValueError(
+                f"drafting_platform_weight must be between 0.0 and 1.0, "
+                f"got {self.drafting_platform_weight}"
             )
 
         # Accept a list of plain dictionaries as well as Keeper records, since
@@ -491,12 +740,23 @@ class DraftConfig:
             adp_target (measured: mean 2.3 picks, up to 11.8), which changes the
             simulation. Before it was a field here, switching platforms silently
             served the previous platform's matrix.
+
+            `platform_weight` is included for exactly the same reason, and was
+            added the moment it became tunable. It scales the whole FFC ->
+            platform shift, so it moves adp_target further than `platform` does
+            (measured: mean 3.7 picks going 0.5 -> 0.75, up to 14.3). While it
+            was a module constant, changing it produced a byte-identical
+            filename -- so a re-run would load the OLD matrix, and the parameter
+            would appear to do nothing. Any future tuning knob that feeds
+            build_table belongs here too.
         """
         import hashlib
 
         parts = (
             self.year, self.num_teams, self.num_rounds, self.scoring_format.value,
-            self.platform, tuple(sorted(self.keepers)),
+            self.platform, self.platform_weight, self.board_rank_weight,
+            self.drafting_platform_weight,
+            tuple(sorted(self.keepers)),
             self.third_round_reversal, self.random_seed,
         )
         return hashlib.sha256(repr(parts).encode()).hexdigest()[:12]
@@ -573,6 +833,13 @@ class DraftConfig:
             "scoring_format": ScoringFormat(doc["scoring_format"]),
             "passing_td_points": points_per_passing_td(doc),
             "platform": doc.get("platform", "espn"),
+            # Not a per-league setting today -- no UI writes it. Read from the
+            # document anyway so a saved draft CAN pin its own weight, and so
+            # that sweeping it is a matter of passing an override here.
+            "platform_weight": doc.get("platform_weight", PLATFORM_WEIGHT),
+            "board_rank_weight": doc.get("board_rank_weight", BOARD_RANK_WEIGHT),
+            "drafting_platform_weight": doc.get(
+                "drafting_platform_weight", DRAFTING_PLATFORM_WEIGHT),
             "starting_slots": doc.get("starting_slots") or dict(DEFAULT_STARTING_SLOTS),
             "keepers": keepers if has_keepers else (),
             "roster_size": doc.get("roster_size"),

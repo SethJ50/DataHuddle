@@ -210,3 +210,88 @@ def test_validate_raises_by_default():
 
     with pytest.raises(AssertionError):
         validate_sim(picks, adp, stdev, config)
+
+
+# --------------------------------------------------------------------------
+# the loop returns its BEST pass, not its last
+# --------------------------------------------------------------------------
+# The fixed-point loop can get worse after getting better. On a real 12-keeper
+# league the trace ran 10.3, 8.7, 8.3, 8.5, 8.4, 9.9, 13.3, 15.0 -- it walked
+# past a decent fit and handed back a bad one. Keeping the best pass turned a
+# 15.4-pick error into 5.3.
+
+
+def test_the_returned_pass_is_the_best_one_scored():
+    config = make_config(num_teams=12, num_rounds=8)
+    rng = np.random.default_rng(11)
+    n = 160
+    adp = np.arange(1.0, n + 1)
+    stdev = 1.0 + adp * 0.40
+    pos_index = position_index(rng.choice(["QB", "RB", "WR", "TE"], n,
+                                          p=[.15, .3, .4, .15]))
+
+    _, _, trace = calibrate_sampler(adp, stdev, pos_index, config,
+                                    n_iterations=8, n_sims=1200, verbose=False)
+
+    chosen = [entry for entry in trace if entry.get("chosen")]
+    assert len(chosen) == 1, "exactly one pass should be marked as kept"
+    assert chosen[0]["adp_error"] == min(e["adp_error"] for e in trace)
+
+
+def test_keeping_the_best_pass_can_never_be_worse_than_the_last():
+    # The guarantee that makes this safe to apply everywhere: the pass is chosen
+    # by the same error the loop already computes, so at worst it ties the last.
+    config = make_config(num_teams=10, num_rounds=6)
+    rng = np.random.default_rng(12)
+    n = 140
+    adp = np.arange(1.0, n + 1)
+    stdev = 1.0 + adp * 0.35
+    pos_index = position_index(rng.choice(["QB", "RB", "WR", "TE"], n,
+                                          p=[.15, .3, .4, .15]))
+
+    _, _, trace = calibrate_sampler(adp, stdev, pos_index, config,
+                                    n_iterations=8, n_sims=1200, verbose=False)
+
+    kept = next(e for e in trace if e.get("chosen"))
+    assert kept["adp_error"] <= trace[-1]["adp_error"]
+
+
+def test_settings_returned_are_ones_that_were_actually_measured():
+    # Each pass simulates with the current settings, scores them, THEN updates.
+    # So the final update happens after the last measurement -- returning it
+    # would ship numbers nothing ever evaluated. Running one pass makes this
+    # sharp: the only scored state is the input, so that is what must come back.
+    config = make_config(num_teams=8, num_rounds=5)
+    rng = np.random.default_rng(13)
+    n = 100
+    adp = np.arange(1.0, n + 1)
+    stdev = 1.0 + adp * 0.30
+    pos_index = position_index(rng.choice(["QB", "RB", "WR", "TE"], n,
+                                          p=[.15, .3, .4, .15]))
+
+    mu, sd, trace = calibrate_sampler(adp, stdev, pos_index, config,
+                                      n_iterations=1, n_sims=800, verbose=False)
+
+    assert len(trace) == 1 and trace[0].get("chosen")
+    assert np.allclose(mu, adp), "one pass should return the settings it scored"
+    assert np.allclose(sd, stdev)
+
+
+def test_calibration_reports_its_error_as_a_number():
+    # run_draft_sim weighs how badly a keeper league missed. Reading that back
+    # out of the detail STRING would break the moment the wording changed.
+    config = make_config(num_teams=8, num_rounds=5)
+    rng = np.random.default_rng(14)
+    n = 100
+    adp = np.arange(1.0, n + 1)
+    stdev = 1.0 + adp * 0.30
+    pos_index = position_index(rng.choice(["QB", "RB", "WR", "TE"], n,
+                                          p=[.15, .3, .4, .15]))
+    picks = monte_carlo_sim(adp, stdev, pos_index, config, n_sims=400)
+
+    results = validate_sim(picks, adp, stdev, config, raise_on_failure=False)
+    calibration = results["calibration"]
+
+    assert isinstance(calibration["error"], float)
+    assert calibration["tolerance"] == 2.0
+    assert calibration["passed"] == (calibration["error"] < calibration["tolerance"])

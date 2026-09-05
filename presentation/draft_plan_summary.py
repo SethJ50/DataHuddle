@@ -22,6 +22,13 @@ from presentation.colors import POSITION_TINTS
 # not cover them, so there is nothing to plan with.
 POSITIONS = ("QB", "RB", "WR", "TE")
 
+# Where "he'll probably be there" turns into "coin flip" turns into "he's gone".
+# Deliberately not symmetric: planning around a 55% player is a real gamble, so
+# the safe band starts high, while anything under a quarter is effectively a
+# wish rather than a plan.
+SAFE_ABOVE = 0.70
+GONE_BELOW = 0.25
+
 # The table's own styling. Sent alongside the table in one st.markdown call.
 # Every colour is either inherited or a grey with an alpha, so the SAME sheet
 # reads correctly on Streamlit's light and dark surfaces with no theme check --
@@ -44,6 +51,19 @@ _STYLE = """
     width: 1%;                           /* shrink to fit "12.09" */
 }
 .dh-plan-summary td.dh-empty { opacity: 0.3; }
+/* The availability percentage trailing each name. Smaller and dimmed so the
+   names stay the thing you read; the colour answers "can I wait?" before the
+   digits do. Colours are rgba over the inherited surface, so one value reads
+   correctly on both the light and the dark theme. */
+.dh-plan-summary .dh-prob {
+    font-size: 0.78em;
+    font-variant-numeric: tabular-nums;
+    margin-left: 0.35em;
+    opacity: 0.85;
+}
+.dh-plan-summary .dh-prob-safe   { color: rgb(34, 160, 90); }
+.dh-plan-summary .dh-prob-toss   { color: rgb(198, 138, 20); }
+.dh-plan-summary .dh-prob-gone   { color: rgb(208, 66, 66); }
 .dh-plan-summary tbody tr:hover { background: rgba(128, 128, 128, 0.08); }
 </style>
 """
@@ -76,7 +96,8 @@ def round_of_label(label):
         return None
 
 
-def build_summary(saved_plan, pick_labels, positions=POSITIONS):
+def build_summary(saved_plan, pick_labels, positions=POSITIONS,
+                  availability=None):
     """Turn a saved draft plan into one row per pick and one column per position.
 
     The data half of the summary board. It fills in a row for EVERY pick you
@@ -89,6 +110,8 @@ def build_summary(saved_plan, pick_labels, positions=POSITIONS):
         2. Walk the picks you own, in draft order.
         3. For each, build a row holding the pick's label plus one entry per
            position: the list of players saved there, or an empty list.
+        4. Pair every player with his chance of surviving to THAT ROW'S pick,
+           which is the pick you would actually spend on him.
 
     Args:
         saved_plan: What `DraftPlanService.get_plan` returns — a dictionary keyed
@@ -98,13 +121,18 @@ def build_summary(saved_plan, pick_labels, positions=POSITIONS):
         pick_labels: What `DraftPlanService.pick_labels` returns — one dictionary
             per round, each with at least `round` and `label`.
         positions: Which positions get a column, in the order they appear.
+        availability: Optional `{overall_pick: {player_name: probability}}`,
+            giving each player's chance of lasting to each of your picks. None
+            means no simulation is loaded, and every player comes back with a
+            probability of None rather than the column disappearing.
 
     Returns:
         pd.DataFrame: One row per pick you own, in draft order, with a "Pick"
             column holding the label ("3.04") and one column per position. Each
-            position cell holds a LIST of display names in priority order, which
-            is empty where nothing is planned. Lists rather than joined text so
-            the rendering half decides how they stack.
+            position cell holds a LIST of `(display_name, probability)` pairs in
+            priority order, empty where nothing is planned. Pairs rather than
+            joined text so the rendering half decides how they stack, and the
+            probability is None wherever the simulation has nothing to say.
     """
     # {(round_number, position): [player names]} — the same plan, but keyed so a
     # changed draft position cannot orphan an entry.
@@ -118,12 +146,59 @@ def build_summary(saved_plan, pick_labels, positions=POSITIONS):
     rows = []
     for pick in pick_labels:
         row = {"Pick": pick["label"]}
+        # Every player in this row is measured against THIS pick -- the one you
+        # would actually spend on him -- not against some league-wide average.
+        at_this_pick = (availability or {}).get(pick["overall_pick"], {})
         for position in positions:
-            # list(...) copies, so nothing here can be mutated by the caller.
-            row[position] = list(by_round.get((pick["round"], position), []))
+            row[position] = [
+                (name, at_this_pick.get(name))
+                for name in by_round.get((pick["round"], position), [])
+            ]
         rows.append(row)
 
     return pd.DataFrame(rows, columns=["Pick", *positions])
+
+
+def probability_html(probability):
+    """Render one availability probability as the dimmed text trailing a name.
+
+    Answers "will he still be there when my turn comes?" at a glance. The colour
+    carries the judgment so the board can be skimmed down a column without
+    reading any digits.
+
+    Steps:
+        1. Return an empty string when there is no probability, so a player the
+           simulation has never heard of simply shows his name -- a "0%" there
+           would claim he is certain to be gone, which is a different and much
+           stronger statement than "unknown".
+        2. Pick a colour class: safe above SAFE_ABOVE, gone below GONE_BELOW,
+           and a coin flip in between.
+        3. Render it as a whole-number percentage in a small dimmed span.
+
+    Args:
+        probability: A number between 0 and 1, or None/NaN when the simulation
+            has nothing to say about this player.
+
+    Returns:
+        str: A `<span>` ready to sit after a name, or "" for no probability.
+    """
+    if probability is None:
+        return ""
+    try:
+        value = float(probability)
+    except (TypeError, ValueError):
+        return ""
+    if value != value:          # NaN, which is not equal to itself
+        return ""
+
+    if value >= SAFE_ABOVE:
+        tone = "dh-prob-safe"
+    elif value < GONE_BELOW:
+        tone = "dh-prob-gone"
+    else:
+        tone = "dh-prob-toss"
+
+    return f'<span class="dh-prob {tone}">{value:.0%}</span>'
 
 
 def summary_html(frame, positions=POSITIONS):
@@ -139,7 +214,8 @@ def summary_html(frame, positions=POSITIONS):
            colour from presentation/colors.py, so the summary speaks the same
            colour language as the rest of the app.
         2. Build one row per pick: the label in its own narrow cell, then each
-           position's players joined by line breaks.
+           position's players joined by line breaks, each followed by its
+           availability percentage from `probability_html` above.
         3. Show a dash rather than nothing for an empty cell, so a planned-but-
            empty position is visibly empty instead of looking unrendered.
         4. Join everything together with the stylesheet in front.
@@ -172,7 +248,15 @@ def summary_html(frame, positions=POSITIONS):
             if players:
                 # <br> rather than a comma: priority order reads down the cell,
                 # which is the order the Move arrows on the tabs below set.
-                stacked = "<br>".join(html.escape(str(name)) for name in players)
+                # Each entry is either a bare name or a (name, probability)
+                # pair, so a caller with no simulation loaded can pass the plan
+                # through unchanged.
+                lines = []
+                for entry in players:
+                    name, probability = (entry if isinstance(entry, tuple)
+                                         else (entry, None))
+                    lines.append(html.escape(str(name)) + probability_html(probability))
+                stacked = "<br>".join(lines)
                 cells.append(f"<td>{stacked}</td>")
             else:
                 cells.append('<td class="dh-empty">—</td>')

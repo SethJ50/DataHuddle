@@ -31,7 +31,7 @@ See draft_model/DESIGN.md sections 3.1 and 3.2.
 import numpy as np
 
 from draft_model.config import (
-    BLOCK, HARD_LIMIT, NEED_BONUS, POSITIONS, RHO, STARTER_DEADLINE, UNDRAFTED,
+    BLOCK, NEED_BONUS, POSITIONS, RHO, STARTER_DEADLINE, UNDRAFTED, roster_limits,
 )
 from draft_model.mechanics import snake_order
 
@@ -72,7 +72,7 @@ def position_index(positions) -> np.ndarray:
         raise ValueError(f"unknown positions {unknown}; expected some of {POSITIONS}")
     return np.array([lookup[p] for p in positions], dtype=np.int8)
 
-def position_limit_arrays():
+def position_limit_arrays(num_rounds: int):
     """Repackage the per-position roster rules as arrays the pick loop can index.
 
     The simulation identifies positions by number, so the constants that are
@@ -80,11 +80,18 @@ def position_limit_arrays():
     up with POSITIONS before the loop starts.
 
     Steps:
-        1. Walk POSITIONS in order and read each position's HARD_LIMIT, using 99
-           for anything not listed, which means "effectively no limit".
-        2. Do the same for STARTER_DEADLINE, using 9999 as the never-reached
+        1. Ask `roster_limits` from draft_model/config.py for this draft's caps.
+           It widens them for a deep draft, where the base values would leave a
+           manager no spare roster slots and so no real choice late on.
+        2. Walk POSITIONS in order and read each position's cap, using 99 for
+           anything not listed, which means "effectively no limit".
+        3. Do the same for STARTER_DEADLINE, using 9999 as the never-reached
            default.
-        3. Return both arrays.
+        4. Return both arrays.
+
+    Args:
+        num_rounds: How many rounds the draft runs. Only used to decide how far
+            the roster caps need widening.
 
     Returns:
         tuple: Two int arrays, `(hard_limit, deadline)`, each with one entry per
@@ -95,7 +102,8 @@ def position_limit_arrays():
         Built once per run rather than inside the pick loop -- a dict lookup per
         player per pick per simulation would undo the whole point of vectorizing.
     """
-    hard_limit = np.array([HARD_LIMIT.get(p, 99) for p in POSITIONS], dtype=np.int16)
+    limits = roster_limits(num_rounds)
+    hard_limit = np.array([limits.get(p, 99) for p in POSITIONS], dtype=np.int16)
     deadline = np.array([STARTER_DEADLINE.get(p, 9999) for p in POSITIONS], dtype=np.int16)
     return hard_limit, deadline
 
@@ -180,7 +188,8 @@ def sim_batch(boards, pos_index, config, *, start_pick=1, end_pick=None,
     Steps:
         1. Read the batch shape from the boards, default the end pick to the full
            draft, and fetch the per-position limit arrays via
-           `position_limit_arrays` above.
+           `position_limit_arrays` above, which widens the roster caps if this
+           draft is deep enough that the base ones would leave no slack.
         2. Set up the state: a "taken" flag per player per simulation, seeded
            with any already-drafted players; a roster count per team per
            position; and a picks matrix filled with UNDRAFTED.
@@ -260,7 +269,7 @@ def sim_batch(boards, pos_index, config, *, start_pick=1, end_pick=None,
     """
     n_sims, n_players, num_teams = boards.shape
     end_pick = config.total_picks if end_pick is None else end_pick
-    hard_limit, deadline = position_limit_arrays()
+    hard_limit, deadline = position_limit_arrays(config.num_rounds)
     keeper_picks = dict(keeper_picks or {})
 
     # --- state, one row per simulation ---
@@ -595,6 +604,11 @@ def sim_one_draft_reference(board, pos_index, config, start_pick=1, end_pick=Non
     end_pick = config.total_picks if end_pick is None else end_pick
     keeper_picks = dict(keeper_picks or {})
 
+    # The same widened caps sim_batch uses. Letting this default to the base
+    # HARD_LIMIT would make the two paths disagree on any draft deep enough to
+    # widen -- and this function exists precisely to catch that kind of drift.
+    limits = roster_limits(config.num_rounds)
+
     taken = [False] * n_players
     counts = [dict() for _ in range(num_teams)]
     picks = np.full(n_players, UNDRAFTED, dtype=np.int16)
@@ -617,7 +631,8 @@ def sim_one_draft_reference(board, pos_index, config, start_pick=1, end_pick=Non
             if taken[i]:
                 continue
             value = effective_value(
-                float(board[i, team]), POSITIONS[pos_index[i]], counts[team], pick
+                float(board[i, team]), POSITIONS[pos_index[i]], counts[team], pick,
+                limits=limits,
             )
             if best_value is None or value < best_value:
                 best_index, best_value = i, value

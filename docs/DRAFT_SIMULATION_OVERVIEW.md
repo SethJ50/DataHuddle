@@ -844,7 +844,9 @@ The simulator handles K/DST from FFC and doesn't need these.
 | Constant | Value | Status |
 |---|---|---|
 | `RHO` | 0.35 | Unfittable — confounded with `sd`. Revisit with real draft logs. |
-| `PLATFORM_WEIGHT` | 0.5 | Worth a sensitivity sweep; if 0→1 barely moves anything, cut the mechanism. |
+| `DRAFTING_PLATFORM_WEIGHT` | 0.7 | The drafting platform's share of the ADP blend; the other two split the remaining 0.3 evenly. One knob, so a set that does not sum to 1 cannot be written. |
+| `BOARD_RANK_WEIGHT` | 0.8 | Share of Yahoo's blend contribution coming from its published board order rather than its ADP. Yahoo is the only source with a board; ESPN/Sleeper store no rank and their projections are not a substitute. Small by construction (~0.6 picks). See DESIGN.md § 5.3. |
+| `PLATFORM_WEIGHT` | 0.8 | Swept 2026-08-18, then unblocked by `fit_to_pick_space`. The centre is now the platform blend outright; FFC supplies `stdev` and the pool. Boards landed 27–50% closer to platform ADP. Per-league override available. See DESIGN.md § 12. |
 | `STARTER_DEADLINE` / `NEED_BONUS` | see config | Control how strongly positional runs emerge. Tune against real drafts. |
 
 ---

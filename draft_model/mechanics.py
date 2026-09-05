@@ -112,7 +112,7 @@ def picks_for_slot(draft_position: int, num_teams: int, num_rounds: int,
 
 
 def effective_value(base_value: float, position: str, roster_counts: dict,
-                    pick_num: int) -> float:
+                    pick_num: int, limits: dict | None = None) -> float:
     """Adjust a manager's value for a player based on what he already rostered.
 
     This is what makes simulated managers behave like people rather than like a
@@ -123,7 +123,7 @@ def effective_value(base_value: float, position: str, roster_counts: dict,
     Steps:
         1. Look up how many players this manager already has at this position,
            treating an absent entry as zero.
-        2. If he is at the HARD_LIMIT for the position, add BLOCK to his value.
+        2. If he is at the roster cap for the position, add BLOCK to his value.
            Since lower is better, adding a huge number pushes the player below
            every real candidate, which makes him effectively unpickable without a
            separate legality check anywhere.
@@ -141,6 +141,10 @@ def effective_value(base_value: float, position: str, roster_counts: dict,
             has there. Positions he has none of may be absent entirely.
         pick_num: The current absolute pick number, used to tell whether a
             starter deadline has passed.
+        limits: Position to the most players a manager will roster there. Pass
+            the widened caps from `config.roster_limits` when simulating a deep
+            draft; defaults to the base HARD_LIMIT, which is what a caller
+            checking one position in isolation wants.
 
     Returns:
         float: The adjusted value, on the same lower-is-better scale as the
@@ -160,10 +164,11 @@ def effective_value(base_value: float, position: str, roster_counts: dict,
         something programmed anywhere.
     """
     have = roster_counts.get(position, 0)
+    limits = cfg.HARD_LIMIT if limits is None else limits
 
     # Position already full: push him below everyone, rather than special-casing
     # legality somewhere else.
-    if have >= cfg.HARD_LIMIT.get(position, 99):
+    if have >= limits.get(position, 99):
         return base_value + cfg.BLOCK
 
     # No starter at this position and it's getting late: reach.

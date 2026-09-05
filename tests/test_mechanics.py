@@ -103,6 +103,24 @@ def test_fingerprint_changes_with_simulation_inputs():
             != DraftConfig(**{**base, "keepers": (keeper,)}).fingerprint())
     assert DraftConfig(**{**base, "random_seed": 1}).fingerprint() != original
 
+    # platform_weight scales the whole FFC -> platform shift, so it moves
+    # adp_target and therefore the picks matrix. While it was a module constant
+    # rather than a field, retuning it produced a byte-identical filename -- so
+    # a re-run silently loaded the matrix built under the OLD weight and the
+    # parameter looked like it did nothing.
+    assert DraftConfig(**{**base, "platform_weight": 0.5}).fingerprint() != original
+    assert (DraftConfig(**{**base, "platform_weight": 0.5}).fingerprint()
+            != DraftConfig(**{**base, "platform_weight": 0.75}).fingerprint())
+
+    # Same reasoning for the board weight: it changes each platform's contribution
+    # to the blend, so it changes adp_target and therefore the picks matrix.
+    assert DraftConfig(**{**base, "board_rank_weight": 0.0}).fingerprint() != original
+    # And the drafting platform's share, which re-weights the same blend.
+    assert (DraftConfig(**{**base, "drafting_platform_weight": 0.5}).fingerprint()
+            != DraftConfig(**{**base, "drafting_platform_weight": 0.7}).fingerprint())
+    assert (DraftConfig(**{**base, "board_rank_weight": 0.2}).fingerprint()
+            != DraftConfig(**{**base, "board_rank_weight": 0.5}).fingerprint())
+
 
 def test_fingerprint_ignores_settings_the_simulation_does_not_use():
     # These change DERIVED numbers (which picks you look at, where replacement

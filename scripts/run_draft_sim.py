@@ -26,10 +26,22 @@ import numpy as np
 from app_context import AppContext
 from draft_model.artifacts import artifact_path, save_picks_matrix
 from draft_model.calibrate import calibrate_sampler, validate_sim
-from draft_model.config import PLATFORM_WEIGHT, RHO, DraftConfig
+from draft_model.config import RHO, DraftConfig
 from draft_model.engine import monte_carlo_sim, position_index
 
 SEASONS = [2024, 2025]
+
+KEEPER_CALIBRATION_ALLOWANCE = 3.0
+"""How far past the normal tolerance a KEEPER league may miss and still be saved.
+
+A keeper league cannot reproduce vendor ADP -- that is measured in redraft
+drafts, and this league has players missing from the pool -- so its calibration
+check is a warning rather than a gate. This bounds that leniency.
+
+Measured on the two real keeper leagues: an 8-team league with a handful of
+keepers lands at 1.4x tolerance, and a 12-team league keeping a first-rounder on
+every team lands at 2.65x. 3x admits both while still refusing the 7.7x an
+artifact reached when calibration genuinely broke down."""
 
 def run_one(ctx, draft, args) -> bool:
     """Build, calibrate, simulate, and save one draft's availability model.
@@ -125,6 +137,14 @@ def run_one(ctx, draft, args) -> bool:
             n_iterations=args.iterations, n_sims=args.calibration_sims,
             keeper_picks=keeper_picks,
         )
+        # Which pass was kept. Usually the last, but the loop can get worse after
+        # getting better, and then this is where the run says so.
+        chosen = next((e for e in trace if e.get("chosen")), None)
+        if chosen is not None:
+            note = "" if chosen["iteration"] == len(trace) - 1 else \
+                   "  <- the loop got worse after this, so later passes were discarded"
+            print(f"  keeping pass {chosen['iteration']} "
+                  f"(|adp err| {chosen['adp_error']:.3f}){note}")
 
     # --- full run ------------------------------------------------------
     print(f"\nsimulating {args.n_sims:,} drafts...")
@@ -152,14 +172,29 @@ def run_one(ctx, draft, args) -> bool:
     # keepers exist. The other four checks are structural identities that hold
     # regardless of keepers, so they stay blocking -- they are what actually
     # catches a broken simulation.
+    #
+    # BUT THE ALLOWANCE IS BOUNDED. Waiving the check unconditionally cannot tell
+    # "off by 3 picks because six players are gone" from "off by 15 with the fit
+    # falling apart" -- and a 12-keeper league once saved an artifact whose worst
+    # players were 65 picks from their target, which the app then served as
+    # confidently as any other.
     if keeper_picks and failed == ["calibration"]:
+        outcome = results["calibration"]
+        ceiling = outcome["tolerance"] * KEEPER_CALIBRATION_ALLOWANCE
         print(f"\n  calibration is off by more than the tolerance, which is EXPECTED "
               f"with {len(keeper_picks)} keeper(s):")
         print(f"  removing kept players from the pool pulls everyone else earlier "
-              f"than their redraft ADP.")
-        print(f"  the bigger the keepers, the bigger the gap. Saving anyway; every "
-              f"structural check passed.")
-        failed = []
+              f"than their redraft ADP, and the bigger the keepers the bigger the gap.")
+
+        if outcome["error"] <= ceiling:
+            print(f"  {outcome['error']:.2f} is within the {ceiling:.1f} allowed for a "
+                  f"keeper league. Saving; every structural check passed.")
+            failed = []
+        else:
+            print(f"  BUT {outcome['error']:.2f} is past the {ceiling:.1f} a keeper "
+                  f"league is allowed, so this is more than the keepers explain.")
+            print(f"  Check the calibration trace above: an error that RISES over the "
+                  f"last few passes means the fit came apart rather than settled.")
 
     if failed:
         print(f"\n  {len(failed)} check(s) failed: {', '.join(failed)}")
@@ -176,7 +211,10 @@ def run_one(ctx, draft, args) -> bool:
         path, picks, config, table["ffc_player_id"], mu=mu, sd=sd,
         metadata={
             "rho": RHO,
-            "platform_weight": PLATFORM_WEIGHT,
+            # From the config, not the module constant: the config is what
+            # actually built the table, and it is what the fingerprint hashed.
+            "platform_weight": config.platform_weight,
+            "board_rank_weight": config.board_rank_weight,
             "drafting_platform": config.platform,
             "calibrated": not args.no_calibrate,
             "calibration_trace": trace,

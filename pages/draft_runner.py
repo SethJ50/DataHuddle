@@ -21,8 +21,9 @@ from presentation.colors import position_legend_html
 from presentation.marks import mark_column_config
 from draft_model.queries import positional_cliffs
 from presentation.draft_board_view import (
-    build_board_grid, build_position_grid, cliff_frame, entries_from_pick_log,
-    equal_column_widths, tint_by_position, tint_positions_column,
+    build_board_grid, build_pending_grid, build_position_grid, cliff_frame,
+    entries_from_keepers, entries_from_pick_log, equal_column_widths,
+    tint_by_position, tint_positions_column,
 )
 from presentation.roster_view import roster_frame, slot_roster
 from presentation.team_strengths import (
@@ -110,6 +111,12 @@ repo = DraftSessionRepo()
 
 NEW_SIM = "__new__"
 
+MODES = ["Live Draft", "Draft Sim"]
+
+SELECTED_SIM_KEY = "selected_sim_session"
+
+SELECTED_MODE_KEY = "selected_runner_mode"
+
 
 def session_summary(session):
     """Describe a session in one line for the picker.
@@ -141,9 +148,11 @@ def pick_sim_session(draft_id):
         1. List this league's sim sessions.
         2. If there are none, create the first automatically so the page is
            immediately usable rather than a dead end.
-        3. Offer them in a dropdown, with a "New sim..." entry at the end.
-        4. If that entry is chosen, take a name and create it on submit.
-        5. Otherwise return whichever session was picked.
+        3. Look up which sim you were last on in THIS league, so leaving the
+           page and coming back resumes it instead of jumping to the first.
+        4. Offer them in a dropdown, with a "New sim..." entry at the end.
+        5. If that entry is chosen, take a name and create it on submit.
+        6. Otherwise remember the choice and return the session picked.
 
     Args:
         draft_id: Which league's practice sessions to offer.
@@ -151,6 +160,13 @@ def pick_sim_session(draft_id):
     Returns:
         dict | None: The chosen session, or None while the user is still filling
             in the new-session form -- in which case the caller should stop.
+
+    Note:
+        THE MEMORY IS KEYED BY LEAGUE, not global. Sessions belong to one draft,
+        so a single remembered id would be meaningless the moment you switched
+        leagues: it would name a session absent from the new list, and the
+        dropdown would fall back to the first one anyway. Per league, each keeps
+        its own place.
     """
     sims = [s for s in repo.list_for_draft(draft_id) if s["mode"] == "sim"]
 
@@ -160,8 +176,15 @@ def pick_sim_session(draft_id):
     options = [s["session_id"] for s in sims] + [NEW_SIM]
     by_id = {s["session_id"]: s for s in sims}
 
+    # Streamlit discards a widget's state on any run that does not draw it, so
+    # the dropdown below is wiped every time you leave this page -- which is why
+    # it used to snap back to the first sim. This is an ordinary session-state
+    # entry rather than a widget key, so it is never collected.
+    remembered = st.session_state.setdefault(SELECTED_SIM_KEY, {}).get(draft_id)
+    index = options.index(remembered) if remembered in by_id else 0
+
     chosen = st.selectbox(
-        "Practice session", options,
+        "Practice session", options, index=index,
         format_func=lambda sid: ("+ New sim..." if sid == NEW_SIM
                                  else session_summary(by_id[sid])),
         key="dr_sim_pick",
@@ -176,9 +199,11 @@ def pick_sim_session(draft_id):
             # would replay the same draft and teach you nothing new.
             created = repo.create(draft_id, "sim", name.strip())
             st.session_state["dr_sim_pick"] = created["session_id"]
+            st.session_state[SELECTED_SIM_KEY][draft_id] = created["session_id"]
             st.rerun()
         return None
 
+    st.session_state[SELECTED_SIM_KEY][draft_id] = chosen
     return by_id[chosen]
 
 
@@ -188,21 +213,29 @@ with st.sidebar:
     if draft is None:
         st.stop()
 
+    # Which mode you were last in. Same reason as SELECTED_SIM_KEY: the control
+    # below is wiped whenever this page is not drawn, so without this, leaving
+    # Draft Runner and coming back would drop you on the live draft even though
+    # you were part-way through a practice sim.
+    remembered_mode = st.session_state.get(SELECTED_MODE_KEY)
+
     # required=True matters. Without it a segmented control lets you DESELECT by
     # clicking the active option, and then returns None -- which would read as
     # "not Draft Sim", hiding every simulation control and quietly falling back
     # to the live session. Worse, the None is stored under the key, so `default`
     # never reapplies and it stays that way until you click something else.
-    mode = st.segmented_control("Mode", ["Live Draft", "Draft Sim"],
-                                default="Live Draft", key="dr_mode",
-                                required=True)
+    mode = st.segmented_control("Mode", MODES, key="dr_mode", required=True,
+                                default=remembered_mode if remembered_mode in MODES
+                                else MODES[0])
 
     # Belt and braces, and it has to happen BEFORE the branch below: a value
     # stored under this key by an older build of the page could still be None,
     # and that would pick the live session while every simulation control
     # quietly disappeared.
-    if mode not in ("Live Draft", "Draft Sim"):
-        mode = "Live Draft"
+    if mode not in MODES:
+        mode = MODES[0]
+
+    st.session_state[SELECTED_MODE_KEY] = mode
 
     st.divider()
     if mode == "Draft Sim":
@@ -549,26 +582,34 @@ if show_board:
     # generator, the first call would consume it and the second would silently
     # produce an empty grid -- and a board with no colour looks like a styling
     # bug rather than an exhausted iterator.
+    # Picks actually made, plus the keepers still to come. Without the second
+    # list a kept pick sits empty until the draft reaches it, which hides the one
+    # thing a keeper league most needs on the board: which picks are already gone.
     entries = list(entries_from_pick_log(state.picks, label_by_id, position_by_id))
+    entries += list(entries_from_keepers(board.config, label_by_id, position_by_id,
+                                         from_pick=state.current_pick))
 
     grid = build_board_grid(entries, board.config,
                             my_slot=board.config.draft_position)
     positions_grid = build_position_grid(entries, board.config)
+    pending_grid = build_pending_grid(entries, board.config)
 
     # Sharing the screen means the board gets a shorter window and scrolls
     # inside it, rather than pushing the console below the fold -- a console you
     # have to scroll to reach is not much better than one you switched away from.
     full_height = min(80 + 35 * board.config.num_rounds, 700)
     st.dataframe(
-        grid.style.apply(tint_by_position(positions_grid), axis=None),
+        grid.style.apply(tint_by_position(positions_grid, pending_grid), axis=None),
         width="stretch",
         height=min(full_height, 320) if show_console else full_height,
         column_config=equal_column_widths(grid),
     )
 
     st.markdown(position_legend_html(), unsafe_allow_html=True)
-    st.caption("Columns are team slots, so even rounds read right-to-left — "
-               "that is the snake. Keepers are marked (K).")
+    caption = ("Columns are team slots, so even rounds read right-to-left — "
+               "that is the snake. Keepers are marked (K)")
+    st.caption(caption + (", and the ones still ahead are shaded faintly."
+                          if board.config.keepers else "."))
 
     if show_console:
         st.divider()

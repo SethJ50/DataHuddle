@@ -51,7 +51,9 @@ Seth's written overview of how draft simulation works!
 - HARD_LIMIT: Max of each position to select in a draft
 - POSITIONS: Canonical position order, list of "QB", "RB", ...
 - STARTER_DEADLINE: Pick num past which a manager holding ZERO players at a pos starts reaching for one.
-- PLATFORM_WEIGHT: How far to shift FFC's ADP towards your platform
+- BOARD_RANK_WEIGHT: Default for `DraftConfig.board_rank_weight` — how much of each platform's contribution comes from its published board order rather than its ADP. 0.8 — board-dominant, with ADP read as an adjustment. ESPN and Yahoo both publish a board; Sleeper does not. Fingerprinted.
+- DRAFTING_PLATFORM_WEIGHT: Default for `DraftConfig.drafting_platform_weight` — the drafting platform's share of the ADP blend; the other two split the rest evenly. 0.7. Fingerprinted.
+- PLATFORM_WEIGHT: Default for `DraftConfig.platform_weight` — how far to shift FFC's ADP towards your platform. Now 0.8 (centre is mostly the platform blend; FFC supplies stdev and the pool). Fingerprinted, so changing it mints new artifacts.
 - POOL_MULTIPLIER: Drop players with ADP beyond total_picks * this
 - MIN_STDEV: Hard floor on width - applied last
 - DEFAULT_STARTING_SLOTS: Fallback lineup for drafts saved before starting_slots existed

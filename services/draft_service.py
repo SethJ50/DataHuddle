@@ -71,14 +71,26 @@ class DraftService:
         Steps:
             1. Call `find_all` from db/documents.py with no filter, which returns
                the whole drafts collection.
+            2. Sort them oldest first, falling back to the id so the order is
+               fully decided even when two drafts share a timestamp.
 
         Returns:
             list: One dictionary per saved draft, each with `draft_id`, `name`,
                 `num_teams`, `draft_position`, `num_rounds`, `platform`,
                 `scoring_format`, `starting_slots`, `keepers`, `roster_size`, and
-                `created_at`. Empty when no draft has been created yet.
+                `created_at`. Oldest first. Empty when no draft has been created
+                yet.
+
+        Note:
+            THE SORT IS LOAD-BEARING. MongoDB promises no particular order for an
+            unsorted query, so the same call could return the drafts in a
+            different order on a later run -- and every page picks its league by
+            position in this list. Without a fixed order, a rerun could quietly
+            switch which league you are looking at.
         """
-        return find_all(Collections.DRAFTS)
+        drafts = find_all(Collections.DRAFTS)
+        return sorted(drafts, key=lambda d: (d.get("created_at") or "",
+                                             d.get("draft_id") or ""))
 
     def create_draft(self, name, num_teams, draft_position, num_rounds, platform,
                     scoring_format, passing_td_points=PASSING_TD_POINTS, starting_slots=None, keepers=None, roster_size=None,

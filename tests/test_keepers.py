@@ -15,6 +15,10 @@ hands out selections the real league never gets.
 The counting tests below exist to pin that down.
 """
 
+from presentation.draft_board_view import (
+    PENDING_ALPHA, BoardEntry, build_board_grid, build_pending_grid,
+    build_position_grid, entries_from_keepers, tint_by_position,
+)
 import numpy as np
 import pytest
 
@@ -380,3 +384,82 @@ def test_pool_too_small_still_raises():
 
     with pytest.raises(ValueError, match="pool too small"):
         sim_batch(boards, pos_index, config)
+
+
+# ---------------------------------------------------------------------------
+# Keepers are on the board before the draft reaches them
+# ---------------------------------------------------------------------------
+# The runner records a keeper only when the draft arrives at his pick, so those
+# cells used to sit empty for most of the draft -- hiding the one thing a keeper
+# league most needs on the board: which picks are already gone, and to whom.
+
+
+def _keeper_board_config(**overrides):
+    values = dict(year=2026, num_teams=12, num_rounds=16, draft_position=11,
+                  scoring_format=ScoringFormat.FULL_PPR,
+                  keepers=(Keeper(11, 1, "chase"), Keeper(6, 2, "cook"),
+                           Keeper(9, 14, "nacua")))
+    values.update(overrides)
+    return DraftConfig(**values)
+
+
+LABELS = {"chase": "Ja'Marr Chase (WR)", "cook": "James Cook III (RB)",
+          "nacua": "Puka Nacua (WR)"}
+KEEPER_POSITIONS = {"chase": "WR", "cook": "RB", "nacua": "WR"}
+
+
+def test_keepers_appear_before_the_draft_starts():
+    config = _keeper_board_config()
+    entries = list(entries_from_keepers(config, LABELS, KEEPER_POSITIONS,
+                                        from_pick=1))
+
+    assert len(entries) == 3
+    assert all(entry.pending for entry in entries)
+    assert all(entry.label.endswith("(K)") for entry in entries)
+
+
+def test_a_pending_keeper_lands_on_his_team_and_round():
+    # Snake order decides the cell, and an even round runs backwards: pick 19 of
+    # a 12-team draft is round 2, which counts down from team 12, so it is
+    # team 6's. Getting this wrong puts a keeper on someone else's roster.
+    config = _keeper_board_config()
+    entries = list(entries_from_keepers(config, LABELS, KEEPER_POSITIONS))
+    grid = build_board_grid(entries, config)
+
+    assert grid.at["R1", "Team 11"] == "11. Ja'Marr Chase (WR) (K)"
+    assert grid.at["R2", "Team 6"] == "19. James Cook III (RB) (K)"
+
+
+def test_a_keeper_already_passed_is_not_shown_twice():
+    # Once the draft reaches him he is in the pick log, and two entries for one
+    # cell would fight over it.
+    config = _keeper_board_config()
+    picks = sorted(config.keeper_picks)
+
+    still_ahead = list(entries_from_keepers(config, LABELS, KEEPER_POSITIONS,
+                                            from_pick=picks[1]))
+
+    assert [entry.pick for entry in still_ahead] == picks[1:]
+
+
+def test_pending_cells_are_shaded_more_faintly_than_made_ones():
+    # Both are spoken for, so both are tinted -- but the board must not also look
+    # as though 157 picks have happened.
+    config = _keeper_board_config()
+    pending = list(entries_from_keepers(config, LABELS, KEEPER_POSITIONS))
+    made = [BoardEntry(pick=1, team=1, label="1. Somebody (WR)", position="WR")]
+
+    grid = build_board_grid(pending + made, config)
+    positions = build_position_grid(pending + made, config)
+    styles = tint_by_position(positions,
+                              build_pending_grid(pending + made, config))(grid)
+
+    assert styles.at["R1", "Team 1"] != "", "a made pick should still be tinted"
+    assert styles.at["R1", "Team 11"] != "", "a pending keeper should be tinted"
+    assert styles.at["R1", "Team 1"] != styles.at["R1", "Team 11"]
+    assert str(PENDING_ALPHA) in styles.at["R1", "Team 11"]
+
+
+def test_a_league_with_no_keepers_adds_nothing():
+    config = _keeper_board_config(keepers=())
+    assert list(entries_from_keepers(config, LABELS, KEEPER_POSITIONS)) == []

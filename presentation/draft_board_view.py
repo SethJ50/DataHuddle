@@ -13,7 +13,20 @@ from typing import NamedTuple
 
 import pandas as pd
 
-from presentation.colors import POSITION_TINTS
+from presentation.colors import POSITION_COLORS, POSITION_TINTS, hex_to_rgba
+
+PENDING_ALPHA = 0.09
+"""How faint a reserved-but-unreached cell is drawn.
+
+Roughly half the tint a made pick gets, which is enough to read as "this is
+coming" rather than "this happened" while keeping the position's colour legible.
+Chosen by eye rather than measured -- it is a visual weight, not a threshold."""
+
+PENDING_TINTS = {
+    position: hex_to_rgba(color, PENDING_ALPHA)
+    for position, color in POSITION_COLORS.items()
+}
+"""The same per-position washes as POSITION_TINTS, at PENDING_ALPHA."""
 
 
 class BoardEntry(NamedTuple):
@@ -30,12 +43,16 @@ class BoardEntry(NamedTuple):
         label: What to show in the cell, such as "12. Bijan Robinson (RB)".
         position: The player's position, used to colour the cell. Empty for a
             pick whose position is unknown.
+        pending: True for a pick that is already spoken for but has not been
+            reached yet -- which in practice means a keeper. Drawn in a fainter
+            wash so the board does not imply the draft has got that far.
     """
 
     pick: int
     team: int
     label: str
     position: str = ""
+    pending: bool = False
 
 
 def build_board_grid(entries, config, my_slot=None):
@@ -200,7 +217,91 @@ def entries_from_pick_log(picks, label_by_id, position_by_id=None):
                          f"{entry['pick']}. {label}", position)
 
 
-def tint_by_position(position_grid):
+def entries_from_keepers(config, label_by_id, position_by_id=None, from_pick=1):
+    """Put keepers on the board before the draft reaches their picks.
+
+    A keeper's pick is spent the moment the league is set up -- nobody will ever
+    choose there -- but the runner only records him when the draft arrives, so
+    those cells used to sit empty for most of the draft. That hides the single
+    most useful thing about a keeper league: which picks are already gone, and to
+    whom. This fills them in from the start.
+
+    Steps:
+        1. Walk `config.keeper_picks`, which maps an overall pick number to the
+           canonical id of the player kept there.
+        2. Skip any keeper the draft has already passed, since `state.picks`
+           already carries him and two entries for one cell would fight.
+        3. Ask `snake_order` from draft_model/mechanics.py which team owns the
+           pick, adding one because it counts teams from zero and the board
+           counts from one.
+        4. Look the player's label and position up, falling back to an em dash
+           for anyone outside the model table.
+        5. Yield him marked `pending`, so the grid can draw him faintly.
+
+    Args:
+        config: The league, for `keeper_picks`, its size and its snake shape.
+        label_by_id: Maps a canonical id to a display label such as
+            "Bijan Robinson (RB)". Keepers are stored by canonical id only, so
+            unlike `entries_from_pick_log` below there is no second key to try.
+        position_by_id: Maps a canonical id to a position, used to colour the
+            cell. Omit it and the cells go uncoloured.
+        from_pick: The first pick not yet made, normally `state.current_pick`.
+            Keepers before it are left out.
+
+    Yields:
+        BoardEntry: One per keeper still to come, with `pending=True`.
+
+    Note:
+        A pending keeper is labelled exactly like a made one, "(K)" and all,
+        because the distinction barely matters to a reader: pick 157 is Puka
+        Nacua's whether the draft has got there or not. The fainter wash is there
+        so the board does not *also* look as though 157 picks have happened.
+    """
+    # Imported here rather than at the top of the module on purpose.
+    # draft_model.config and draft_model.mechanics import each other, which only
+    # resolves if config is loaded first; a top-level import here would load
+    # mechanics first whenever this module is imported before them, and that
+    # raises. Deferring it to call time sidesteps the ordering entirely.
+    from draft_model.mechanics import snake_order
+
+    position_by_id = position_by_id or {}
+
+    for pick, canonical_id in sorted(config.keeper_picks.items()):
+        if pick < from_pick:
+            continue
+
+        team = snake_order(pick, config.num_teams, config.third_round_reversal) + 1
+        position = position_by_id.get(canonical_id, "")
+        label = label_by_id.get(canonical_id)
+        if label is None:
+            label = f"Unknown ({position})" if position else "—"
+
+        yield BoardEntry(pick, team, f"{pick}. {label} (K)", position, pending=True)
+
+
+def build_pending_grid(entries, config):
+    """Arrange the same picks into a matching grid of pending flags.
+
+    Exists so `tint_by_position` below can draw a reserved pick more faintly than
+    one that has actually happened. Same shape and same column names as the label
+    grid, so a styling function can line the two up cell for cell.
+
+    Steps:
+        1. Reuse `_grid_of` above, taking each entry's `pending` flag.
+
+    Args:
+        entries: The same `BoardEntry` sequence the label grid was built from.
+            Pass a LIST, not a generator -- see `build_board_grid` above.
+        config: The league, for its size and round count.
+
+    Returns:
+        pd.DataFrame: One row per round, one column per team. True where the pick
+            is reserved but unreached, and an empty string where no entry landed.
+    """
+    return _grid_of(entries, config, lambda entry: entry.pending)
+
+
+def tint_by_position(position_grid, pending_grid=None):
     """Build a styling function that colours each board cell by position.
 
     Turns the board from a wall of text into something you can read at a glance:
@@ -211,11 +312,16 @@ def tint_by_position(position_grid):
         1. Define an inner function that pandas calls with the label grid.
         2. For each cell, read the SAME cell of the position grid -- the two are
            built to the same shape, so they line up positionally.
-        3. Look that position's tint up, leaving unfilled cells unstyled.
+        3. Choose the faint set of tints if a pending grid was supplied and marks
+           this cell, and the normal set otherwise.
+        4. Look that position's tint up, leaving unfilled cells unstyled.
 
     Args:
         position_grid: The frame from `build_position_grid` above, the same shape
             as the label grid being styled.
+        pending_grid: The frame from `build_pending_grid` above, same shape
+            again. Cells it marks are drawn at PENDING_ALPHA -- reserved, but not
+            yet reached. Omit it and every filled cell is drawn the same.
 
     Returns:
         A function suitable for `labels.style.apply(fn, axis=None)`.
@@ -237,7 +343,10 @@ def tint_by_position(position_grid):
         styles = pd.DataFrame("", index=frame.index, columns=frame.columns)
         for row in range(len(frame)):
             for column in range(len(frame.columns)):
-                tint = POSITION_TINTS.get(position_grid.iat[row, column])
+                pending = (pending_grid is not None
+                           and bool(pending_grid.iat[row, column]))
+                tints = PENDING_TINTS if pending else POSITION_TINTS
+                tint = tints.get(position_grid.iat[row, column])
                 if tint:
                     styles.iat[row, column] = f"background-color: {tint}"
         return styles

@@ -20,19 +20,52 @@ import numpy as np
 import pandas as pd
 
 from draft_model.artifacts import artifact_path, load_picks_matrix, matches_table
-from draft_model.config import PLATFORM_WEIGHT, DraftConfig
+from draft_model.config import DraftConfig
 from draft_model.queries import (
     availability_matrix, best_available_by_position, compute_vorp,
     expected_best_at_pick, positional_cost_of_waiting, prob_any_available,
     replacement_value,
 )
-from draft_model.table import blend_adp, build_table
+from draft_model.table import blend_adp, build_table, rank_to_pick_scale
 from draft_model.calibrate import simulated_mean_pick, simulated_stdev_pick
 
-# Weighted toward the platform the league actually drafts on -- the default list
-# a platform shows in-app anchors real leaguemates far more than consensus does.
-BASE_PLATFORM_WEIGHTS = {"espn": 0.25, "yahoo": 0.25, "sleeper": 0.25}
-DRAFTING_PLATFORM_WEIGHT = 0.5
+PLATFORMS = ("espn", "yahoo", "sleeper")
+
+
+def blend_weights(platform, drafting_weight):
+    """Split the ADP blend between the league's own platform and the other two.
+
+    The platform a league drafts on gets the lion's share, because the default
+    list it shows in-app anchors real leaguemates far more than any consensus
+    does. The other two are a sanity check on it rather than equal voices.
+
+    Steps:
+        1. If the league drafts somewhere outside the three sources, give them
+           an equal share each -- none of them is "yours" in that case.
+        2. Otherwise assign the drafting platform its weight, and split whatever
+           is left evenly between the remaining two.
+
+    Args:
+        platform: Where the league drafts: "espn", "yahoo", or "sleeper".
+            Anything else falls back to an even split.
+        drafting_weight: The drafting platform's share, 0.0 to 1.0, normally
+            `config.drafting_platform_weight`.
+
+    Returns:
+        dict: Platform name to its weight. Always sums to 1.0.
+
+    Note:
+        DERIVED from one number rather than written out as three, so a set that
+        does not sum to 1 cannot be expressed. The previous pair of constants
+        allowed exactly that: an unrecognized platform left all three at 0.25,
+        summing to 0.75, which `blend_adp` then renormalized away silently.
+    """
+    if platform not in PLATFORMS:
+        return {name: 1.0 / len(PLATFORMS) for name in PLATFORMS}
+
+    others = [name for name in PLATFORMS if name != platform]
+    share = (1.0 - drafting_weight) / len(others)
+    return {platform: drafting_weight, **{name: share for name in others}}
 
 
 @dataclass
@@ -431,7 +464,8 @@ class DraftSimService:
         self._projections_service = projections_service
         self._sim_dir = Path(sim_dir)
 
-    def platform_blend(self, fmt, platform) -> pd.Series:
+    def platform_blend(self, fmt, platform, rank_weight=0.0,
+                       drafting_weight=0.5) -> pd.Series:
         """Blend ESPN, Yahoo, and Sleeper ADP into one number per player.
 
         The platform your league actually drafts on is weighted double the
@@ -442,9 +476,12 @@ class DraftSimService:
             1. Load the comparison table and label its rows by canonical id.
             2. Split it into one ADP series per platform, dropping the players
                that platform has no number for.
-            3. Start from the equal base weights and double the drafting
-               platform's, if it is one of the three.
-            4. Hand both to `blend_adp` from draft_model/table.py, which
+            3. Fold each platform's published board order into its own number
+               with `_board_view` below, which is a no-op when `rank_weight` is
+               0 and for any platform without a board.
+            4. Work out each platform's share with `blend_weights` above, which
+               gives the drafting platform its weight and splits the rest.
+            5. Hand both to `blend_adp` from draft_model/table.py, which
                renormalizes per player so someone only one platform ranks still
                gets that platform's number rather than a fraction of it.
 
@@ -452,6 +489,13 @@ class DraftSimService:
             fmt: Which scoring format's ADP to read.
             platform: The platform this league drafts on, which gets the heavier
                 weight. An unrecognized name simply leaves the weights equal.
+            rank_weight: How much of each platform's contribution comes from
+                its board order rather than its ADP. Defaults to 0.0 so that
+                calling this without it reproduces the pure-ADP blend exactly;
+                callers with a config should pass `config.board_rank_weight`.
+            drafting_weight: The drafting platform's share of the blend. Defaults
+                to the historical 0.5 so an ad-hoc call is reproducible; callers
+                with a config should pass `config.drafting_platform_weight`.
 
         Returns:
             pd.Series: One blended ADP per player, labelled by canonical id. NaN
@@ -459,14 +503,72 @@ class DraftSimService:
         """
         comparison = self._adp_comparison_service.compare(fmt).set_index("canonical_id")
         sources = {
-            "espn": comparison["espn_adp"].dropna(),
-            "yahoo": comparison["yahoo_adp"].dropna(),
+            "espn": self._board_view("espn", comparison["espn_adp"].dropna(), rank_weight),
+            "yahoo": self._board_view("yahoo", comparison["yahoo_adp"].dropna(), rank_weight),
             "sleeper": comparison["sleeper_adp"].dropna(),
         }
-        weights = dict(BASE_PLATFORM_WEIGHTS)
-        if platform in weights:
-            weights[platform] = DRAFTING_PLATFORM_WEIGHT
-        return blend_adp(sources, weights)
+        return blend_adp(sources, blend_weights(platform, drafting_weight))
+
+    def _board_view(self, source, platform_adp, rank_weight):
+        """Mix a platform's board order into its own ADP, in its own pick units.
+
+        ADP says when a player WAS taken; the board is the ranked list the
+        platform puts in front of a drafter, which is part of why they took him.
+        Only a platform publishing both can have the two combined.
+
+        Steps:
+            1. Hand back the ADP untouched if the board is switched off, which
+               keeps `rank_weight = 0.0` an exact no-op.
+            2. Fetch this platform's board with `board_rank` on the comparison
+               service, and narrow it to players who also have an ADP here --
+               there is nothing to blend for anyone else. Sleeper always comes
+               back empty, so it falls straight through.
+            3. Convert those ranks into pick numbers with `rank_to_pick_scale`
+               from draft_model/table.py, borrowing the spacing from this
+               platform's own ADP so the two are measured in the same units.
+            4. Blend them with `blend_adp`, which renormalizes per player, so
+               anyone without a board entry keeps his plain ADP rather than a
+               diluted version of it.
+
+        Args:
+            source: Which platform this is: "espn", "yahoo", or "sleeper".
+            platform_adp: That platform's ADP per player, labelled by canonical
+                id, already stripped of missing values.
+            rank_weight: How much of the result comes from the board, 0.0 to 1.0.
+
+        Returns:
+            pd.Series: That platform's view of when each player goes, on the
+                same labels as `platform_adp`.
+
+        Note:
+            Applied INSIDE each platform's existing share rather than as extra
+            sources in the outer blend. Extra sources would silently raise the
+            platforms that HAVE a board above the ones that do not -- a
+            platform-balance change disguised as a rank feature.
+
+            Sleeper has no board and no usable substitute: sorting its
+            projections by points puts eleven quarterbacks in the top fifteen,
+            because raw points ignore positional scarcity.
+        """
+        if not rank_weight:
+            return platform_adp
+
+        board = self._adp_comparison_service.board_rank(source)
+        if board is None or board.empty:
+            return platform_adp
+
+        board = board.reindex(platform_adp.index).dropna()
+        if board.empty:
+            return platform_adp
+
+        # Same players on both sides, so the borrowed spacing is this
+        # platform's own.
+        rank_picks = rank_to_pick_scale(board, platform_adp.reindex(board.index))
+
+        return blend_adp(
+            {"adp": platform_adp, "rank": rank_picks},
+            {"adp": 1.0 - rank_weight, "rank": rank_weight},
+        )
 
     def build_model_table(self, config) -> pd.DataFrame:
         """Assemble the table the simulation runs on, from live app data.
@@ -520,11 +622,18 @@ class DraftSimService:
 
         return build_table(
             config, ffc,
-            platform_adp=self.platform_blend(config.scoring_format, config.platform),
+            platform_adp=self.platform_blend(
+                config.scoring_format, config.platform,
+                rank_weight=config.board_rank_weight,
+                drafting_weight=config.drafting_platform_weight),
             enrichments={
                 "projection": projections.set_index("canonical_id")[points_column]
             },
-            platform_weight=PLATFORM_WEIGHT,
+            # From the config so the weight that builds the table is the same
+            # one the artifact's fingerprint hashed. Reading the module constant
+            # here would let the two disagree, and a table built under one
+            # weight would be served from a file named for another.
+            platform_weight=config.platform_weight,
         )
 
     def artifact_for(self, draft_id, config) -> Path:

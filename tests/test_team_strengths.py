@@ -22,10 +22,15 @@ from presentation.team_strengths import (
     category_frame, category_label, category_options, my_team_frame, ranks_for,
     shade_ranks,
 )
+from draft_model.config import UNDRAFTED, DraftConfig
+from draft_model.queries import compute_vorp, replacement_value
+from scoring import ScoringFormat
 from services.draft_runner_service import (
     DraftState, _bench_average, _replacement_gap, _slot_points, resimulate,
-    team_strength_table,
+    simulated_strength_table, team_strength_table,
 )
+from services.draft_sim_service import DraftBoard
+from tests.test_draft_runner_live import FakeArtifact
 from tests.test_draft_runner_live import draft_through, make_board
 
 
@@ -241,3 +246,114 @@ def test_the_rank_shading_darkens_towards_first_place():
     assert styles.iloc[0, 0] and styles.iloc[1, 0]
     assert styles.iloc[0, 0] != styles.iloc[1, 0]
     assert styles.iloc[2, 0] == ""            # unranked stays blank
+
+
+# ---------------------------------------------------------------------------
+# The same comparison from a SAVED simulation, before a draft starts
+# ---------------------------------------------------------------------------
+# `simulated_strength_table` is the pre-draft entry point to the same arithmetic.
+# It has no DraftState: every roster comes out of the saved picks matrix, so
+# every number is an average over all the simulations rather than a mix of what
+# a team holds and what it is projected to get.
+
+
+def sim_board(num_teams=4, num_rounds=8, n_sims=1, star=None):
+    """A DraftBoard whose artifact carries a picks matrix we control.
+
+    Player i goes at pick i+1 in every simulation, so team 1 owns player 0,
+    team 2 owns player 1, and so on down the snake. That makes "which players
+    did this team get" checkable by hand.
+
+    Args:
+        num_teams: League size.
+        num_rounds: Rounds drafted.
+        n_sims: How many identical simulations to stack.
+        star: A (player_index, points) pair to overwrite one projection with,
+            for testing that a team is scored on the players IT drafted.
+
+    Returns:
+        DraftBoard: Ready to hand to `simulated_strength_table`.
+    """
+    n = 120
+    total = num_teams * num_rounds
+
+    # Deliberately NOT random: the whole point is a board we can reason about.
+    positions = np.array(["QB", "RB", "WR", "TE"] * (n // 4))
+    projection = np.linspace(320.0, 40.0, n)
+    if star is not None:
+        projection[star[0]] = star[1]
+
+    table = pd.DataFrame({
+        "ffc_player_id": range(1000, 1000 + n),
+        "canonical_id": [f"id{i}" for i in range(n)],
+        "name": [f"Player {i}" for i in range(n)],
+        "position": positions,
+        "team": ["DET"] * n,
+        "adp_target": np.arange(1.0, n + 1),
+        "projection": projection,
+    })
+
+    config = DraftConfig(year=2026, num_teams=num_teams, num_rounds=num_rounds,
+                         draft_position=1, scoring_format=ScoringFormat.HALF_PPR)
+
+    picks = np.full((n_sims, n), UNDRAFTED, dtype=np.int16)
+    picks[:, :total] = np.arange(1, total + 1, dtype=np.int16)
+
+    artifact = FakeArtifact(n)
+    artifact.picks = picks
+
+    replacement = replacement_value(projection, positions,
+                                    config.starting_slots, num_teams)
+    return DraftBoard(config=config, table=table, artifact=artifact,
+                      vorp=compute_vorp(projection, positions, replacement),
+                      replacement=replacement, stale=False,
+                      kept=np.zeros(n, dtype=bool))
+
+
+def test_saved_simulation_scores_every_team():
+    # Same shape as the live table, so everything in presentation/team_strengths
+    # reads it without knowing which of the two produced it.
+    table = simulated_strength_table(sim_board(num_teams=4))
+
+    assert list(table.columns) == [1, 2, 3, 4]
+    assert table.index.names == ["Group", "Category"]
+    assert ("Starting", "Lineup total") in table.index
+
+
+def test_a_team_is_scored_on_the_players_it_actually_drafted():
+    # Player 0 goes first overall, so he belongs to team 1 and nobody else. Make
+    # him worth an absurd amount and team 1 must come out on top -- if the roster
+    # masks were built off the wrong picks, some other team would inherit him.
+    table = simulated_strength_table(sim_board(num_teams=4, star=(0, 10_000.0)))
+    totals = table.loc[("Starting", "Lineup total")]
+
+    assert totals.idxmax() == 1, f"team 1 should lead, got {totals.to_dict()}"
+
+
+def test_starting_categories_are_averaged_across_simulations():
+    # The headline claim of the page: these are averages over every simulated
+    # draft, not one roster. Stacking a simulation must not move them.
+    one = simulated_strength_table(sim_board(n_sims=1))
+    five = simulated_strength_table(sim_board(n_sims=5))
+
+    starting = [key for key in one.index if key[0] == "Starting"]
+    pd.testing.assert_frame_equal(one.loc[starting], five.loc[starting])
+
+
+def test_ratings_are_optional():
+    # Leaving them out drops the risk and upside rows and touches nothing else,
+    # which is what lets a caller without UDK's ratings still use this.
+    board = sim_board()
+    without = simulated_strength_table(board)
+    groups = {group for group, _ in without.index}
+
+    assert "Risk" not in groups and "Upside" not in groups
+    assert ("Starting", "Lineup total") in without.index
+
+    ratings = pd.DataFrame({
+        "canonical_id": board.table["canonical_id"],
+        "risk": np.linspace(-1, 1, len(board.table)),
+        "upside": np.linspace(1, -1, len(board.table)),
+    })
+    with_ratings = simulated_strength_table(board, ratings=ratings)
+    assert {"Risk", "Upside"} <= {group for group, _ in with_ratings.index}

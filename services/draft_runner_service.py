@@ -1006,6 +1006,74 @@ def team_strength_table(state, board, picks=None, projected=True,
     return table
 
 
+def simulated_strength_table(board, ratings=None) -> pd.DataFrame:
+    """Score every team on every category, from a SAVED simulation.
+
+    The same comparison `team_strength_table` above makes during a live draft,
+    but for a draft that has not started. It reads the artifact
+    scripts/run_draft_sim.py already wrote, so every roster is simulated from
+    pick 1 and every number is an average over all of those simulations.
+
+    Steps:
+        1. Pull the projections and positions out of the player table.
+        2. Line the risk and upside ratings up with the table using
+           `align_ratings` above, if any were supplied.
+        3. For each team, ask `picks_for_slot` in draft_model/mechanics.py which
+           picks they own, then `roster_from_picks` in draft_model/queries.py
+           which players landed on those picks in each simulation.
+        4. Hand that roster to `_strength_values` below, which fills the lineup,
+           turns it into one number per category, and averages across the
+           simulations.
+        5. Collect the teams side by side into a single table.
+
+    Args:
+        board: The DraftBoard from `DraftSimService.load_board`, carrying the
+            saved picks matrix, the player table, and the replacement levels.
+        ratings: A frame with `canonical_id`, `risk` and `upside`, such as the
+            roster service's. Omit it and the risk and upside rows are simply
+            left out.
+
+    Returns:
+        pd.DataFrame: One row per category and one column per team, the columns
+            numbered by draft slot. The row labels are a two-level index of
+            (group, category), so a view can show the groups apart. Exactly the
+            shape `team_strength_table` returns, so everything in
+            presentation/team_strengths.py reads it unchanged.
+
+    Note:
+        NO "AS DRAFTED" MODE HERE, and there could not be one. Mid-draft the
+        panel offers a choice because some picks have happened and some have
+        not; in a saved artifact none of them have, so every roster is entirely
+        simulated and the distinction has nothing to describe.
+
+        WHAT THE AVERAGING MEANS. A team's WR score is the average of what their
+        receivers were worth across ten thousand different drafts, not the score
+        of one particular roster. So it answers "how does this draft slot tend to
+        do", which is a question about the SLOT rather than about a manager --
+        every simulated team drafts by the same rules, and only their position in
+        the order differs.
+    """
+    projections = board.table["projection"].to_numpy()
+    positions = board.table["position"].to_numpy()
+    adjusted = align_ratings(board, ratings) if ratings is not None else None
+
+    config = board.config
+    columns = {}
+    for team in range(1, config.num_teams + 1):
+        owned = picks_for_slot(team, config.num_teams, config.num_rounds,
+                               config.third_round_reversal)
+        # (n_sims, n_players) of True/False: did this team get this player in
+        # that simulation.
+        roster = roster_from_picks(board.artifact.picks, owned)
+        columns[team] = _strength_values(roster, projections, positions,
+                                         config.starting_slots,
+                                         board.replacement, adjusted)
+
+    table = pd.DataFrame(columns)
+    table.index = pd.MultiIndex.from_tuples(table.index, names=["Group", "Category"])
+    return table
+
+
 def _strength_values(roster, projections, positions, starting_slots,
                      replacement, adjusted=None):
     """Turn one team's roster into one number per category.

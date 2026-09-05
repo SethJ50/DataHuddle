@@ -419,10 +419,51 @@ adp_target = ffc_adp + platform_weight * (platform_blend_adp - ffc_adp)
 - `blend_adp` renormalizes weights **per player** across whichever sources actually have him.
   A deep player present only in Sleeper should get Sleeper's ADP, not Sleeper's ADP scaled
   down by Sleeper's fractional weight.
-- The shift applies only to players present in **both** FFC and the platform blend. Everyone
-  else keeps pure FFC ADP.
-- `platform_weight = 0.5` by default. `0.0` recovers pure FFC — keep that path working, it's
-  the clean fallback whenever the platform CSVs go stale.
+- A player present in **both** sources is shifted by his own measured gap. A player the
+  platform blend doesn't rank is shifted by the *median gap of his 20 nearest ADP
+  neighbours* (`impute_missing_shift`), so he rides the scale change rather than sitting on
+  FFC's scale while everyone around him moves. Pass `impute_missing=False` for the old
+  leave-them-alone behaviour.
+- **Why imputation rather than just matching K/DST to platform data:** there is none to
+  match. ESPN and Sleeper publish no kicker or defense ADP at all, and Yahoo's comes from a
+  differently-shaped draft (top kicker ≈ pick 85 against FFC's 133). Measured on the 2026
+  half-PPR pull, 36 of 205 players had no platform number — all 16 defenses, all 17 kickers,
+  3 receivers — and they are concentrated in exactly the late rounds where a mismatched
+  scale distorts K/DST timing.
+- `platform_weight = 0.8` by default, and **every league runs at it**, including the
+  12-keeper one. FFC keeps a 20% share as a stabilizer (`blend_adp` renormalizes per player,
+  so a one-platform player otherwise arrives undiluted), and still supplies every `stdev`
+  and the player pool. It lives on `DraftConfig`, not as a bare constant, **so that it is
+  fingerprinted** (§ 8) and so an awkward league *can* carry its own value if ever needed.
+  `0.0` recovers pure FFC — the clean fallback whenever the platform CSVs go stale.
+- **Each platform's published BOARD ORDER feeds into its own share** (`board_rank_weight = 0.8` — board-dominant, ADP read as an adjustment to it). ESPN and Yahoo both publish one; Sleeper does not, and its projections cannot substitute.
+  ADP says when a player *was* taken; the board is the ranked list Yahoo puts in front of a
+  drafter, which is part of *why*. `rank_to_pick_scale` dense-ranks it (Yahoo's raw ranks are
+  sparse, running to 2473 across 1,175 players) and hands out Yahoo's own ADP values in board
+  order — so the output is a **permutation** of that ADP, able to re-order the board but never
+  to stretch or shift its scale. It applies INSIDE Yahoo's existing weight, never as a fourth
+  source, which would silently push Yahoo to ~40% of the centre in an ESPN league.
+  **Expect a small effect** — measured mean movement 0.61 picks in a Yahoo league, 0.31 in an
+  ESPN one — because board and ADP already agree at ρ=0.90 and Yahoo carries only 25–50% of
+  the blend. Yahoo is the only source that publishes a board: ESPN and Sleeper store no rank,
+  and their projections are not a substitute (sorting Sleeper's by projected points puts
+  eleven QBs in the top fifteen, since raw points ignore positional scarcity).
+- **`adjust_for_keepers` restates the target as when a player goes in THIS league.** Vendor
+  ADP is measured in redraft drafts where every player is available; in a keeper league the
+  kept players never reach the board, so everyone else genuinely goes earlier. Scoring a
+  keeper league against raw vendor ADP measures the league's rules, not the model. Each
+  player moves up by the number of kept players going earlier than him, and back down by the
+  number of keeper picks landing before him. Worked example: Chase with ADP 3, kept at 3.01
+  (overall pick 25) — picks 3–24 all move up one, pick 25 is consumed, picks 26+ unchanged.
+  It handles a keeper held *later* than his ADP with the same two counts and no special case.
+- **`fit_to_pick_space` runs immediately after the shift, and is what makes 1.0 possible.**
+  A draft of N picks hands out the numbers 1..N exactly once, so the players selected
+  average a pick number fixed before the draft starts. The platform blend spreads players
+  deeper than that, so aiming at it directly forces the sim to draft EVERYONE early — an
+  error calibration provably cannot remove, because it is arithmetic and not aim. One
+  shared multiplier fixes it; ordering and relative spacing are untouched. It is
+  keeper-aware: keeper picks are not selections and kept players never compete, and
+  ignoring that mis-scaled a 12-keeper league badly (5.45 → 7.53).
 - **`stdev_target` stays raw FFC.** The shift moves the center; there is no defensible reason
   for it to touch the width.
 
@@ -586,20 +627,27 @@ measuring it over players who are actually drafted in most sims.
 
 ### 7.2 The loop
 
-A fixed-point loop, with three details that matter:
+A fixed-point loop, with four details that matter:
 
 ```python
 mu, sd = adp_target.copy(), stdev_target.copy()
+best = None
 for i in range(n_iterations):
     picks = monte_carlo_sim(mu, sd, ..., n_sims=2000, rng=fresh_rng(SEED))   # (1)
     sim_adp   = simulated_mean_pick(picks)
     sim_stdev = simulated_stdev_pick(picks)
 
+    err = mean_abs(adp_target - sim_adp)
+    if best is None or err < best.err:
+        best = (err, mu.copy(), sd.copy())                                   # (4)
+
     mu += ALPHA * (adp_target - sim_adp)                                     # (2)
     sd[reliable] *= np.clip(
         stdev_target[reliable] / sim_stdev[reliable], 0.8, 1.25              # (3)
     )
-    log(i, mean_abs(adp_target - sim_adp), mean_abs(stdev_target - sim_stdev))
+    log(i, err, mean_abs(stdev_target - sim_stdev))
+
+return best.mu, best.sd, trace                                               # (4)
 ```
 
 1. **Common random numbers.** Reseed identically every iteration. Otherwise the
@@ -637,6 +685,25 @@ for i in range(n_iterations):
    measured, and the input value came from FFC's own observation of real drafts, which is
    better evidence than a curve fitted to a different subpopulation. The players affected are
    deep ones who barely influence availability at your actual picks.
+
+4. **Return the BEST pass, not the last.** The gate in (3) makes divergence rare, not
+   impossible. On a 12-keeper league the trace ran `10.3, 8.7, 8.3, 8.5, 8.4, 9.9, 13.3,
+   15.0` — it walked past a decent fit and returned a bad one, and the app then served that
+   artifact as confidently as any other. Keeping the best-scoring pass turned a **15.4-pick
+   error into 5.3**.
+
+   There is a second, independent reason. Each pass simulates with the current settings,
+   scores them, *then* updates — so the final update happens after the last measurement, and
+   returning it means shipping numbers nothing ever evaluated.
+
+   This cannot make a healthy league worse: the pass is chosen by the same error the loop
+   already computes, so at worst it equals the last. Measured across the four real leagues,
+   every one improved (`1.84 → 1.34`, `2.83 → 2.11`, `1.67 → 1.27`, `15.15 → 5.39`) and three
+   of the four had been returning a pass worse than one they had already found.
+
+   The per-pass error is measured on `n_sims` simulations and carries noise, so taking a
+   minimum slightly favours a lucky pass. At the observed scale — ~0.1 picks of noise against
+   divergences of several — that is not worth guarding against.
 
 `simulated_mean_pick` is deliberately conditional on being drafted, matching how vendors
 compute ADP. The comparison is only valid if both sides are defined the same way.
@@ -680,6 +747,20 @@ in seconds and wrong numbers discovered during a live draft.
    `[0,1,2,3,3,2,1,0,0,1,2,3]`, plus the third-round-reversal variant. An off-by-one here
    doesn't crash — it produces a completely plausible draft with systematically wrong
    ownership, and every probability built on top of it is quietly wrong.
+
+**Check 1 is a warning rather than a gate for keeper leagues, but a BOUNDED one.** A keeper
+league cannot reproduce vendor ADP — that is measured in redraft drafts, and this league has
+players missing from the pool — so `run_draft_sim.py` saves it anyway. Waiving it
+*unconditionally* was a mistake: it could not tell "off by 3 picks because six players are
+gone" from "off by 15 with the fit falling apart", and a 12-keeper league duly saved an
+artifact whose worst players sat 65 picks from their target.
+
+`KEEPER_CALIBRATION_ALLOWANCE = 3.0` bounds it. Measured on the two real keeper leagues: 8
+teams with a handful of keepers lands at 1.05× tolerance, 12 teams keeping a first-rounder
+apiece lands at 2.7×. 3× admits both and still refuses the 7.7× that prompted this. Past the
+ceiling the run refuses to save and points at the trace, since an error that *rises* over the
+last few passes means the fit came apart rather than settled. The other four checks stay
+blocking regardless — they are structural identities that keepers do not affect.
 
 ---
 
@@ -959,15 +1040,62 @@ BLOCK      = 10_000.0    # added to a roster-full player's value; effectively un
 HARD_LIMIT       = {"QB": 2,   "RB": 6,  "WR": 6,  "TE": 2,   "K": 1,   "DST": 1}
 STARTER_DEADLINE = {"QB": 100, "RB": 60, "WR": 60, "TE": 100, "K": 170, "DST": 170}
 
-PLATFORM_WEIGHT = 0.5    # 0.0 = pure FFC ADP, 1.0 = pure platform blend (§ 5.3)
+MIN_ROSTER_SLACK   = 3              # spare slots a manager must keep after a full draft
+FLEXIBLE_POSITIONS = ("RB", "WR")   # which caps widen to provide it
+
+PLATFORM_WEIGHT = 0.8    # default for DraftConfig.platform_weight (§ 5.3)
+DRAFTING_PLATFORM_WEIGHT = 0.7  # your platform's share of the blend; others split the rest
+BOARD_RANK_WEIGHT = 0.8  # share of each platform's number from its board (§ 5.3)
 POOL_MULTIPLIER = 1.5    # drop players with adp_target > total_picks * this
 ```
 
 - **`RHO = 0.35`** — unfittable, for the reasons in § 3.2. Revisit after a season of logged
   drafts.
-- **`PLATFORM_WEIGHT = 0.5`** — worth a sensitivity check: if sweeping it from 0.0 to 1.0
-  barely moves the availability numbers, the whole shift mechanism isn't earning its
-  complexity and should be cut.
+- **`PLATFORM_WEIGHT = 0.8`** — swept 2026-08-18 (ESPN Fantasy Freaks, 10 teams / 17 rounds /
+  full PPR). FFC and the platform blend disagree by a mean of **14.9 picks** (median 12.2,
+  max 57.2) over the 169 players both cover, so there is a lot of room between them.
+
+  The sweep **before** `fit_to_pick_space` existed:
+
+  | weight | `\|sim − target\|` | `\|sim − platform\|` | gate |
+  |---|---|---|---|
+  | 0.00 | 3.77 | 13.30 | FAIL |
+  | 0.50 | 3.42 | 8.19 | pass |
+  | 0.75 | 4.84 | 6.29 | FAIL |
+  | 1.00 | 5.57 | 5.57 | FAIL |
+
+  Raising the weight always moved the board toward the platforms, but above 0.5 the
+  simulation could no longer reproduce its own target and the gate blocked saving. **Two
+  suspects were investigated and both cleared:**
+
+  - *Positional flow* (`STARTER_DEADLINE` / `NEED_BONUS`) — the per-position residual was
+    measured and found to be uniformly NEGATIVE across every position, which is an aggregate
+    bias, not a redistribution between positions. Retuning these would not have touched it.
+  - *Width scale* — rescaling every `stdev_target` by the ADP-band curve at its shifted
+    centre was built and measured. It moved the calibration error by **0.05 picks** against
+    seed noise of 0.15. It is not the cause. Do not rebuild it.
+
+  **The actual cause was arithmetic.** A draft of N picks hands out the numbers 1..N exactly
+  once, so the players selected average a pick number fixed before the draft starts. Mean
+  target of the 170 players drafted: pure FFC 81.93 (forced +3.57 late), half-and-half 85.76
+  (−0.26, neutral), pure platform 88.91 (forced −3.41 early). Calibration cannot remove a
+  bias that is conservation rather than aim. `fit_to_pick_space` corrects it with one shared
+  multiplier, and 1.0 then passes comfortably.
+
+  This also retires the idea that 0.5 was a well-chosen value. It was simply the weight at
+  which the two scales happened to cancel — a coincidence of this data that would drift the
+  moment either source moved.
+
+  **Held at 0.8 rather than 1.0** so FFC keeps a 20% share as a stabilizer against
+  `blend_adp`'s per-player renormalization. Measured result versus the pre-change baseline:
+  ESPN Fantasy Freaks 7.51 → 4.55, Test Draft 7.39 → 4.99, Test Yahoo Keepers 7.35 → 5.73
+  (rank correlation 0.98 → 0.996 on the redraft leagues).
+
+  **No per-league override is in use.** All four leagues run at 0.8, including the 12-keeper
+  one — that is only possible because of `adjust_for_keepers`. Before it existed, Yahoo Mimi
+  had to be dropped to 0.6 to save at all; it now scores 4.54 against its keeper-adjusted
+  target, better than the 5.45 it managed before any of this at a far lower weight. The
+  field remains available if a future league needs it.
 - **`STARTER_DEADLINE` and `NEED_BONUS`** control how strongly positional runs emerge. Runs
   are an *emergent* property of these two constants, not something programmed anywhere: once
   two managers take tight ends, the remaining TE-less managers start applying the bonus and
@@ -975,7 +1103,23 @@ POOL_MULTIPLIER = 1.5    # drop players with adp_target > total_picks * this
   frequency against real draft logs and tune.
 - **`HARD_LIMIT`** — max players a simulated manager will roster per position. Too tight and
   the board can lock up (validation check 2 catches this); too loose and rosters stop looking
-  like real ones.
+  like real ones. Read `config.roster_limits(num_rounds)` rather than this dict directly.
+- **`MIN_ROSTER_SLACK = 3`** — `HARD_LIMIT` sums to 18, so it only describes *preferences*
+  while the draft is meaningfully shorter than that. At 17 rounds a manager has one spare
+  slot, so his late picks are decided by which position he still has room for rather than by
+  who he rates highest — and the sim stops reproducing ADP, because ADP is a statement about
+  preferences. `roster_limits` widens the `FLEXIBLE_POSITIONS` caps until this much slack
+  exists. Measured on a real 10-team/17-round league, mean |simulated ADP − target| over the
+  reliably-drafted players: **slack 1 → 2.79 (fail, and the trace *rises*)**, slack 3 → 1.68,
+  slack 5 → 1.66, slack 7 → 1.63. The cliff between 1 and 3 is the constraint releasing;
+  past 3 is noise.
+
+  It is a **no-op at 15 rounds and below**, and that is load-bearing rather than incidental:
+  widening changes the picks matrix, but `HARD_LIMIT` is *not* in `fingerprint()`, so a
+  matrix that changed here would keep its old filename and every saved artifact would go
+  silently stale. Since the result depends only on `num_rounds` — which *is* fingerprinted —
+  that cannot happen. The corollary is that hand-editing any of the three constants
+  invalidates saved artifacts without renaming them; re-run `--all` after touching them.
 - **`STARTER_DEADLINE` for K/DST** is doing real work now that they're in the pool — it's
   what stops the sim from drafting kickers in round 8.
 

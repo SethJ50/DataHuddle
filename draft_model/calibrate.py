@@ -208,12 +208,15 @@ def calibrate_sampler(adp_target, stdev_target, pos_index, config,
            and `draft_rate` above.
         5. Compute the average absolute error over the core population and record
            it in the trace, printing it too when verbose.
-        6. Update the centre: take the gap between target and simulated ADP, but
+        6. Keep a copy of the settings whenever this pass scored better than any
+           before it, since those are the ones that get returned.
+        7. Update the centre: take the gap between target and simulated ADP, but
            only for players whose measurement is trustworthy, and move `alpha` of
            the way there rather than all of it.
-        7. Update the width: compute the ratio of target spread to simulated
+        8. Update the width: compute the ratio of target spread to simulated
            spread for measurable players, clamp it so one noisy player cannot
            swing wildly, and apply it with MIN_STDEV as a floor.
+        9. Return the best-scoring pass rather than the last one.
 
     Args:
         adp_target: Vendor ADP per player — what the simulation's mean pick
@@ -236,15 +239,38 @@ def calibrate_sampler(adp_target, stdev_target, pos_index, config,
 
     Returns:
         tuple: `(mu, sd, trace)`. `mu` and `sd` are the calibrated sampler
-            settings — from here on these are the ONLY values passed to the
-            sampler, and adp_target/stdev_target become validation references
-            only. `trace` is a list of one dictionary per pass holding
-            "iteration", "adp_error", "sd_error", and "n_measurable", for
-            inspection and for storing in the artifact.
+            settings from the BEST-scoring pass — from here on these are the ONLY
+            values passed to the sampler, and adp_target/stdev_target become
+            validation references only. `trace` is a list of one dictionary per
+            pass holding "iteration", "adp_error", "sd_error", and
+            "n_measurable", for inspection and for storing in the artifact. The
+            pass whose settings were returned also carries "chosen": True.
 
     Note:
-        THREE DETAILS THAT MATTER, each of which is easy to omit and quietly
-        degrades the result:
+        WHY THE BEST PASS AND NOT THE LAST. Two reasons, and the second is the
+        stronger one:
+
+        1. The loop can get worse after getting better. On a 12-keeper league the
+           trace ran 10.3, 8.7, 8.3, 8.5, 8.4, 9.9, 13.3, 15.0 -- it walked past
+           a decent fit and returned a bad one. Keeping the best turned a
+           15.4-pick error into 5.3.
+        2. The last pass's settings have NEVER BEEN MEASURED. Each pass simulates
+           with the current settings, scores them, and then updates -- so the
+           final update happens after the last measurement, and returning it
+           means shipping numbers nothing ever evaluated.
+
+        This cannot make a healthy league worse: the returned pass is chosen by
+        the same error the loop already computes, so at worst it equals the last
+        pass. On a well-behaved league it moves things a little (3.24 -> 3.10 on
+        a 10-team redraft) and on a diverging one it saves the run.
+
+        The per-pass error is measured on `n_sims` simulations and so carries
+        some noise, which means taking a minimum over passes slightly favours a
+        lucky one. At the observed scale -- noise around 0.1 picks against
+        divergences of several -- that is not worth guarding against.
+
+        THREE FURTHER DETAILS THAT MATTER, each of which is easy to omit and
+        quietly degrades the result:
 
         1. COMMON RANDOM NUMBERS. Every pass re-simulates with the same seed, so
            the underlying normal draws are identical and only mu/sd differ. Without
@@ -298,6 +324,10 @@ def calibrate_sampler(adp_target, stdev_target, pos_index, config,
     core = core & ~kept
 
     trace = []
+    # The best pass seen so far, as (error, mu, sd). Snapshotting inside the loop
+    # BEFORE the update below is what makes these the settings the error was
+    # actually measured on -- see the note on why the last pass is not returned.
+    best = None
     if verbose:
         print(f"{'pass':>4s} {'|adp err|':>10s} {'|sd err|':>10s} {'measurable':>11s}")
 
@@ -326,6 +356,9 @@ def calibrate_sampler(adp_target, stdev_target, pos_index, config,
             print(f"{iteration:>4d} {adp_error:>10.3f} {sd_error:>10.3f} "
                   f"{int(reliable.sum()):>11d}")
 
+        if best is None or adp_error < best[0]:
+            best = (adp_error, mu.copy(), sd.copy())
+
         # --- centre: damped step, ONLY where the measurement is trustworthy ---
         # Gating `mu` on reliability is essential rather than tidy. For a player
         # drafted in half the simulations, sim_adp is conditional on the drafts
@@ -350,7 +383,11 @@ def calibrate_sampler(adp_target, stdev_target, pos_index, config,
         ratio[measurable] = stdev_target[measurable] / sim_sd[measurable]
         sd = np.clip(sd * np.clip(ratio, *sd_clip), MIN_STDEV, None)
 
-    return mu, sd, trace
+    # Hand back the best settings, not the last ones. Mark which pass they came
+    # from so the caller can report it and the artifact records it.
+    chosen = min(range(len(trace)), key=lambda i: trace[i]["adp_error"])
+    trace[chosen]["chosen"] = True
+    return best[1], best[2], trace
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +441,9 @@ def validate_sim(picks, adp_target, stdev_target, config, adp_tolerance=2.0,
     Returns:
         dict: Maps each check name to a dictionary with "passed" (a boolean) and
             "detail" (a readable explanation, present whether it passed or not).
+            The "calibration" entry also carries "error" and "tolerance" as
+            numbers, so a caller can weigh how badly it missed rather than
+            reading it back out of the text.
 
     Raises:
         AssertionError: If any check fails and `raise_on_failure` is True. The
@@ -433,7 +473,7 @@ def validate_sim(picks, adp_target, stdev_target, config, adp_tolerance=2.0,
     """
     results = {}
 
-    def record(name, passed, detail):
+    def record(name, passed, detail, **extra):
         """Store one check's outcome, and raise immediately if it failed.
 
         Defined inside `validate_sim` so it can write into the `results`
@@ -448,11 +488,14 @@ def validate_sim(picks, adp_target, stdev_target, config, adp_tolerance=2.0,
             name: The check's short name, used as the dictionary key.
             passed: Whether the check succeeded.
             detail: A readable explanation, recorded whether it passed or not.
+            **extra: Any further values worth storing alongside, such as the
+                calibration error as a number. Stored as given, so a caller can
+                make a decision on the value instead of parsing `detail`.
 
         Raises:
             AssertionError: If the check failed and `raise_on_failure` is True.
         """
-        results[name] = {"passed": bool(passed), "detail": detail}
+        results[name] = {"passed": bool(passed), "detail": detail, **extra}
         if raise_on_failure and not passed:
             raise AssertionError(f"{name}: {detail}")
 
@@ -490,7 +533,8 @@ def validate_sim(picks, adp_target, stdev_target, config, adp_tolerance=2.0,
            f"mean |simulated ADP - target| = {error:.2f} picks over "
            f"{int(reliable.sum())} reliably-drafted players (tolerance {adp_tolerance}); "
            f"{core_error:.2f} over all {int(core.sum())} expected-drafted, which "
-           f"includes boundary players whose targets are unreachable")
+           f"includes boundary players whose targets are unreachable",
+           error=error, tolerance=float(adp_tolerance))
 
     # --- 2. every simulation drafts exactly the right number ---
     drafted = (picks < UNDRAFTED).sum(axis=1)

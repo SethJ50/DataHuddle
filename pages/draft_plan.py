@@ -117,8 +117,71 @@ pick_options = [pick["label"] for pick in pick_labels_list]
 # {(round_label, position): [player names in priority order]}
 saved_plan = ctx.draft_plan_service.get_plan(draft["draft_id"])
 
-# DataFrame: one row per pick you own, columns ["Pick", "QB", "RB", "WR", "TE"]
-summary = build_summary(saved_plan, pick_labels_list)
+# The simulation is loaded here rather than further down so the summary can use
+# it too. `load_sim_board` is cached, so the call inside the board section below
+# is a cache hit rather than a second load.
+summary_board, summary_board_error = load_sim_board(ctx, draft, year=2026)
+
+
+@st.cache_data(show_spinner="Working out who lasts to each of your picks...")
+def get_plan_availability(signature: str, _board, picks: tuple):
+    """Work out each planned player's chance of lasting to each of your picks.
+
+    The Plan Summary shows every pick you own at once, so it needs a probability
+    per PICK rather than the single round the tabs below are working on.
+
+    Steps:
+        1. Ask the board for availability at every pick you own, in one pass.
+        2. Drop rows with no canonical id -- team defenses cannot be planned.
+        3. Translate those ids into the display names the plan is saved under,
+           using the roster service, since the model table spells names its own
+           way and the plan does not know about canonical ids.
+        4. Build one lookup per pick.
+
+    Args:
+        signature: The board's cache signature. Not read inside, but it IS the
+            cache key -- it changes whenever the board would differ, which is
+            what makes the unhashable board argument safe to ignore.
+        _board: The loaded DraftBoard. The leading underscore tells Streamlit
+            not to try to hash it.
+        picks: Every overall pick number you own, as a tuple so it can be
+            hashed into the cache key.
+
+    Returns:
+        dict: `{overall_pick: {display_name: probability}}`. A player the
+            simulation has never heard of is simply absent, which the summary
+            renders as no percentage rather than as 0%.
+    """
+    sim = _board.availability(target_picks=list(picks)).dropna(subset=["canonical_id"])
+
+    # canonical_id -> the name the plan is saved under.
+    display_by_id = ctx.roster_service.roster().set_index("canonical_id")["display_name"]
+    display_names = sim["canonical_id"].map(display_by_id)
+
+    lookup = {}
+    for pick in picks:
+        column = f"P@{pick}"
+        if column not in sim.columns:
+            continue
+        lookup[pick] = {
+            name: probability
+            for name, probability in zip(display_names, sim[column])
+            if isinstance(name, str)
+        }
+    return lookup
+
+
+plan_availability = None
+if not summary_board_error:
+    plan_availability = get_plan_availability(
+        ctx.draft_sim_service.board_signature(draft, 2026),
+        summary_board,
+        tuple(pick["overall_pick"] for pick in pick_labels_list),
+    )
+
+# DataFrame: one row per pick you own, columns ["Pick", "QB", "RB", "WR", "TE"],
+# each cell a list of (display_name, probability) pairs.
+summary = build_summary(saved_plan, pick_labels_list, availability=plan_availability)
 
 st.title("Draft Plan")
 
@@ -141,7 +204,7 @@ with st.container(border=True):
     _later = [p["overall_pick"] for p in pick_labels_list if p["overall_pick"] > current_pick]
     next_pick = _later[0] if _later else current_pick
 
-    sim_board, board_error = load_sim_board(ctx, draft, year=2026)
+    sim_board, board_error = summary_board, summary_board_error
 
     if board_error:
         # A warning rather than an info box
