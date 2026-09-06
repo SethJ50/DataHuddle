@@ -32,11 +32,22 @@ __pycache__/
 # deployment -- see deployment.py.
 data/sim/
 
+# The modelling sandbox. `research/` reads the app but the app never reads it,
+# so leaving both out cannot break the container. data/research/ is Parquet
+# snapshots, which can run to hundreds of MB.
+notebooks/
+research/
+data/research/
+requirements-research.txt
+
 # Tests, notebooks and documentation. All useful; none of it runs in the
 # container.
 tests/
 docs/
 *.ipynb
+# The line above only matches notebooks at the top level -- Docker's `*` does
+# not cross a folder boundary. This one catches them in any subfolder.
+**/*.ipynb
 *.md
 !README.md
 

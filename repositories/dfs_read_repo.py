@@ -47,6 +47,14 @@ PBP_COLUMNS = [
 
     # Who touched the ball, for player-level splits
     "passer_player_id", "rusher_player_id", "receiver_player_id",
+
+    # The return game. `punt_fair_catch` is load-bearing: nflverse fills in
+    # punt_returner_player_id on fair catches too, so without it a fair catch
+    # counts as a 0-yard return and the punt return rate reads 70% instead of
+    # the true ~43%.
+    "punt_returner_player_id", "kickoff_returner_player_id",
+    "punt_returner_player_name", "kickoff_returner_player_name",
+    "return_yards", "punt_fair_catch",
 ]
 """The only play-by-play columns loaded. THIS LIST IS LOAD-BEARING.
 

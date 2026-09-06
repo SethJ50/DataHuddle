@@ -1,0 +1,33 @@
+# Everything the notebooks in notebooks/ need, on top of what the app needs.
+#
+# KEPT SEPARATE FROM requirements.txt ON PURPOSE. The Dockerfile copies only
+# requirements.txt, so nothing listed here ever ships to the Hugging Face
+# Space -- the app imports none of it, and Jupyter plus scikit-learn plus
+# xgboost would add hundreds of megabytes to an image that gains nothing.
+#
+# Install locally with:
+#     pip install -r requirements-research.txt
+#
+# The line below pulls in the app's own dependencies too, so this one file is
+# all you need.
+-r requirements.txt
+
+# The notebook itself. jupyterlab is the editor; ipykernel is what actually
+# runs your code and is what VS Code's notebook editor needs as well.
+jupyterlab
+ipykernel
+
+# Plotting. matplotlib is the base; seaborn is a thin layer over it with much
+# better defaults for the "distribution of X by position" kind of chart.
+matplotlib
+seaborn
+
+# Modelling. scikit-learn covers regression, classification, cross-validation
+# and metrics; xgboost is the gradient-boosted tree library that tends to win
+# on tabular data like this.
+scikit-learn
+xgboost
+
+# Statistical models with readable output -- p-values, confidence intervals and
+# summary tables that scikit-learn deliberately does not give you.
+statsmodels

@@ -13,3 +13,13 @@ __pycache__/
 # inside it records the config + seed needed to reproduce it.
 data/sim/
 
+# Notebook data snapshots: Parquet copies of tables the notebooks build, some
+# of them hundreds of MB. Every one is regenerable by calling the function in
+# research/datasets.py that made it, which is what makes them safe to drop.
+data/research/
+
+# Trained models and other notebook output. Pickled models are large, binary,
+# and tied to the exact library version that wrote them -- the notebook that
+# trains one is the thing worth keeping in git, not the file it produces.
+notebooks/artifacts/
+

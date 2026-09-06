@@ -97,6 +97,7 @@ adp_analysis_page = st.Page("pages/adp_analysis.py", title = "ADP Analysis")
 draft_runner_page = st.Page("pages/draft_runner.py", title = "Draft Runner")
 team_comparison_page = st.Page("pages/team_comparison.py", title = "Team Comparison")
 sim_viewer_page = st.Page("pages/sim_viewer.py", title = "Sim Viewer")
+return_game_page = st.Page("pages/return_game.py", title = "Return Game")
 
 # Daily Fantasy. "Player Profile" and "Team Profile" appear in both groups on
 # purpose: they answer the same question for a different game, and the sidebar
@@ -119,6 +120,7 @@ dfs_cheat_sheet_page = st.Page("pages/dfs_cheat_sheet.py", title = "Cheat Sheet"
 # sidebar link. See deployment.py for the environment variable that decides.
 sections = {
     "": [home_page],
+    "In-Season": [return_game_page],
     "DFS": [dfs_basic_plots_page, dfs_player_profile_page, dfs_team_profile_page, dfs_cheat_sheet_page],
 }
 
@@ -128,6 +130,7 @@ if pre_draft_enabled():
     sections = {
         "": sections[""],
         "Pre-Draft": [draft_manager_page, player_profile_page, team_profile_page, draft_plan_page, path_to_wr1_page, adp_comparison_page, adp_analysis_page, draft_runner_page, team_comparison_page, sim_viewer_page],
+        "In-Season": [return_game_page],
         "DFS": sections["DFS"],
     }
 
